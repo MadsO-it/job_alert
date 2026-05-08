@@ -1,12 +1,12 @@
 # Job Alert
 
-Et personligt jobsøgnings-værktøj. Scraper IT Jobbank og StepStone, lader Claude vurdere relevansen af hvert opslag op mod min profil, og sender et ugentligt mail-digest med kun de relevante jobs.
+Et personligt jobsøgnings-værktøj. Scraper 3 jobsider, lader Claude vurdere relevansen af hvert opslag op mod min profil, og sender et ugentligt mail-digest med kun de relevante jobs.
 
-Bygget for at slippe for at scrolle jobsider hver dag. Ren personlig automation. Det er min kandidat-profil i koden: (nyuddannet cand.it i IT-ledelse fra AAU, juni 2026). Hvis du vil bruge det selv, skal `CANDIDATE_PROFILE`-strengen i `job_alert.py` tilpasses din egen baggrund.
+Bygget for at slippe for at scrolle jobsider hver dag. Det er min egen kandidat-profil i koden: (nyuddannet cand.it i IT-ledelse fra AAU, juni 2026). Hvis du vil bruge det selv, skal `CANDIDATE_PROFILE`-strengen i `job_alert.py` tilpasses din egen baggrund.
 
 ## Hvad det gør
 
-1. Henter aktuelle jobopslag fra IT Jobbank og StepStone (begge har offentlige søgeresultater)
+1. Henter aktuelle jobopslag fra 3 jobsider (begge har offentlige søgeresultater)
 2. Filtrerer groft på geografi (Storkøbenhavn) og kategori
 3. Sender hvert opslag til Claude (claude-sonnet) i batches af 10 og beder om en ja/nej-vurdering ud fra min profil
 4. Husker hvilke opslag der allerede er sendt (`seen_jobs.json`) så du ikke får dubletter
