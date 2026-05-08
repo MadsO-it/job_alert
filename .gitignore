@@ -1,0 +1,15 @@
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ALDRIG commit - hemmeligheder
+.credentials
+.anthropic_key
+.env
+.env.*
+
+# Lokal state
+seen_jobs.json
+jobs_*.json
