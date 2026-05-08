@@ -9,6 +9,7 @@ venv/
 .anthropic_key
 .env
 .env.*
+!.env.example
 
 # Lokal state
 seen_jobs.json
