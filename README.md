@@ -2,7 +2,7 @@
 
 Et personligt jobsøgnings-værktøj. Scraper IT Jobbank og StepStone, lader Claude vurdere relevansen af hvert opslag op mod min profil, og sender et ugentligt mail-digest med kun de relevante jobs.
 
-Bygget for at slippe for at scrolle jobsider hver dag. Ren personlig automation — kandidat-profilen i koden er konfigureret til mig (nyuddannet cand.it i IT-ledelse fra AAU, juni 2026). Hvis du vil bruge det selv, skal `CANDIDATE_PROFILE`-strengen i `job_alert.py` tilpasses din egen baggrund.
+Bygget for at slippe for at scrolle jobsider hver dag. Ren personlig automation. Det er min kandidat-profil i koden: (nyuddannet cand.it i IT-ledelse fra AAU, juni 2026). Hvis du vil bruge det selv, skal `CANDIDATE_PROFILE`-strengen i `job_alert.py` tilpasses din egen baggrund.
 
 ## Hvad det gør
 
@@ -25,7 +25,7 @@ Python 3.10+, kun to dependencies:
 - `requests` til scraping
 - `python-dotenv` til at læse `.env`
 
-Mail sendes via `smtplib` (stdlib) — fungerer med en hvilken som helst SMTP-server. Default-konfigurationen er One.com.
+Mail sendes via `smtplib` (stdlib) som fungerer med en hvilken som helst SMTP-server. Default-konfigurationen er One.com.
 
 ## Opsætning
 
@@ -81,10 +81,10 @@ Det meste står i toppen af `job_alert.py`:
 
 ## Begrænsninger
 
-- Jobnet er ikke understøttet — de kræver NemID-login og kan ikke scrapes
+- Jobnet og LinkedIn er ikke understøttet da de ikke synes at kunne scrapes
 - Scraping bryder formentlig hver service's TOS, så brug det i moderate mængder og til personlig brug
-- AI-vurderinger er ikke perfekte — Claude tager fejl ind imellem. Læs altid mailen kritisk
+- AI-vurderinger er ikke perfekte, så nogle opslag er måske mindre relevante. 
 
 ## Bygget med Claude
 
-Dele af koden er skrevet i samarbejde med Claude. Logik, struktur og fejlretning er gennemgået og forstået.
+Dele af koden er skrevet i samarbejde med Claude.
