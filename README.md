@@ -82,7 +82,7 @@ Det meste står i toppen af `job_alert.py`:
 ## Begrænsninger
 
 - Jobnet og LinkedIn er ikke understøttet da de ikke synes at kunne scrapes
-- Scraping bryder formentlig hver service's TOS, så brug det i moderate mængder og til personlig brug
+- Brug det kun i moderate mængder og til personlig brug
 - AI-vurderinger er ikke perfekte, så nogle opslag er måske mindre relevante. 
 
 ## Bygget med Claude
