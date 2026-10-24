@@ -44,8 +44,9 @@ def _require_env(name: str) -> str:
         )
     return value
 
-RECIPIENT_EMAIL = _require_env("RECIPIENT_EMAIL")
-SENDER_EMAIL    = _require_env("SENDER_EMAIL")
+# Mail-adresser kræves kun når der sendes mail (ikke i --export-tilstand)
+RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL", "").strip()
+SENDER_EMAIL    = os.environ.get("SENDER_EMAIL", "").strip()
 
 SMTP_HOST = os.environ.get("SMTP_HOST", "send.one.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
@@ -152,8 +153,9 @@ CPH_LOCATIONS = [
     "hørsholm", "hellerup", "charlottenlund", "søborg", "birkerød",
     "farum", "holte", "vedbæk", "kokkedal", "humlebæk", "espergærde",
     "taastrup", "hedehusene", "greve", "køge", "roskilde", "solrød",
-    "storkøbenhavn", "sjælland", "nordsjælland",
-    "remote", "hjemmearbejde", "hybrid", "fleksibel", "hele landet",
+    "storkøbenhavn", "nordsjælland",
+    "copenhagen", "valby", "vanløse", "brønshøj", "nordhavn", "amager", "kastrup",
+    "bagsværd", "måløv", "skovlunde", "smørum", "virum", "nærum", "klampenborg",
 ]
 
 NON_CPH_LOCATIONS = [
@@ -164,76 +166,116 @@ NON_CPH_LOCATIONS = [
     "ikast", "middelfart", "faaborg", "assens", "kerteminde", "nyborg",
     "aabenraa", "haderslev", "tønder", "varde", "billund", "struer",
     "fyn", "jylland", "midtjylland", "nordjylland", "sydjylland", "sønderjylland",
+    "hobro", "ringe", "vojens", "hedensted", "risskov", "lystrup", "viby j", "skanderborg",
+    "karup", "warsaw", "hinnerup", "brabrand", "aabybro", "frederikshavn", "grenaa",
 ]
+
+# Generiske ord der ikke siger noget om byen. Tæller kun som KBH hvis ingen
+# by udenfor KBH er nævnt.
+GENERIC_LOCATION_WORDS = ["remote", "hjemmearbejde", "hybrid", "fleksibel", "hele landet", "sjælland"]
+
+# StepStone-søgningen dækker hele landet, så her kræves et kendt KBH-område.
+# Jobindex og IT Jobbank afgrænser selv til Storkøbenhavn på serversiden.
+STRICT_LOCATION_SOURCES = {"StepStone"}
 
 def is_copenhagen_area(job: dict) -> bool:
     location = (job.get("location") or "").lower().strip()
     if not location:
         return True
-    for city in NON_CPH_LOCATIONS:
-        if city in location:
-            return False
     for cph in CPH_LOCATIONS:
         if cph in location:
             return True
-    return True
+    for city in NON_CPH_LOCATIONS:
+        if city in location:
+            return False
+    if any(w in location for w in GENERIC_LOCATION_WORDS):
+        return True
+    return job.get("source") not in STRICT_LOCATION_SOURCES
 
 
-# ─── AI-filtrering med Claude ─────────────────────────────────────────────────
+# ─── AI-vurdering med Claude (rød / gul / grøn) ───────────────────────────────
+#
+# Claude afviser ikke opslag. Alle opslag der har passeret de hårde filtre
+# inddeles i grøn / gul / rød, og Mads vurderer selv til sidst.
+# CANDIDATE_PROFILE og RATING_RULES bruges både af API-kaldet her og af den
+# planlagte sky-kørsel (se CLOUD_RUN.md), så vurderingen er ens begge steder.
 
 CANDIDATE_PROFILE = """
 Kandidat-profil:
-- Uddannelse: Kandidat i IT-ledelse (cand.it) fra Aalborg Universitet, færdiguddannet juni 2026
-- Erfaring: Nyuddannet – ingen eller meget begrænset erhvervserfaring (maks 1-2 år studiejobs)
-- Kompetencer: IT-projektledelse, digital transformation, forretningsudvikling, organisationsforandring,
-  IT-strategi, stakeholder management, agile metoder, kravspecifikation, forretningsanalyse,
-  IT-governance, change management, systemimplementering
-- Søger: Entry-level eller junior stillinger i Storkøbenhavn inden for IT-ledelse, digitalisering,
-  IT-konsulentarbejde, forretningsanalyse, IT-koordinering eller lignende
-- Ønsker IKKE: Rent tekniske udviklerstillinger, militær/forsvar-specialiststillinger,
-  stillinger der kræver 3+ års erfaring, senior/lead/chef-roller, ph.d.-krav,
-  sundhedsfaglige stillinger, håndværk, transport eller ufaglærte jobs
+- Uddannelse: Cand.it. i IT-ledelse, Aalborg Universitet (juni 2026). BSc i sociologi.
+- Erfaring: Ca. 3 års deltidsstilling i Aalborg Kommune med governance-design fra bunden
+  (processer, godkendelsesstrukturer, beslutnings-gates, rapportering, automatisering med
+  Power Automate, beslutningsoplæg til ledelsen) omkring EU-finansierede projekter.
+  Semesterprojekter: governance-flow for IT-anskaffelser i en kommune; proceskortlægning og
+  softwarevalg for en teknisk virksomhed; risikovurdering med CIS Controls-roadmap.
+  Speciale om organisatorisk cyber resilience i en stor international logistikvirksomhed.
+- Profil: Struktur-, proces- og governance-menneske med teknisk forståelse. Ikke udvikler;
+  kan læse og justere eksisterende kode med AI-assistance.
+- Søger: Stillinger i Storkøbenhavn på junior- til mellemniveau, gerne finans og pharma.
 """
 
-def ai_filter_jobs(jobs: list[dict], api_key: str) -> list[dict]:
+RATING_RULES = """
+Inddel hvert opslag i én af tre farver:
+
+GRØN = klart match. IT-governance, IT-portefølje, IT-strategi, forretnings- eller
+  procesanalyse, proces-excellence, change management, digitalisering i komplekse
+  organisationer, IT-risiko, compliance (fx NIS2/DORA), operational/cyber resilience fra
+  en organisations- og governance-vinkel, PMO/projektkoordinering, IT-konsulent eller
+  management-konsulent inden for disse felter. Niveau: graduate, junior eller ingen
+  tydelig erfaringskrav-barriere.
+
+GUL = delvist match eller uklart. Rollen ligger tæt på profilen men har et element der
+  taler imod (fx 3-5 års erfaring krævet, tung domæneviden, mere salg eller drift end
+  analyse, teknisk slagside), eller opslaget er for kortfattet til at afgøre det.
+
+RØD = dårligt match. Rent tekniske roller (udvikling, infrastruktur, drift, data
+  engineering), salg/marketing, økonomi/regnskab uden IT-vinkel, ledelsesroller med
+  personaleansvar, eller roller der kræver mange års specialisterfaring.
+  Studenterjobs, praktikpladser og ph.d.-stillinger er også røde, da de kræver
+  indskrivning på en uddannelse (kandidaten er færdiguddannet).
+
+Ved tvivl mellem to farver: vælg den mest positive.
+"""
+
+RATING_ORDER = {"green": 0, "yellow": 1, "red": 2, "unrated": 3}
+_COLOR_WORDS = {
+    "grøn": "green", "groen": "green", "green": "green",
+    "gul": "yellow", "yellow": "yellow",
+    "rød": "red", "roed": "red", "red": "red",
+}
+
+
+def ai_classify_jobs(jobs: list[dict], api_key: str) -> list[dict]:
     """
-    Bruger Claude til at vurdere hvert jobopslag individuelt.
-    Returnerer kun de opslag Claude vurderer som relevante.
-    Behandler opslag i batches for at spare API-kald.
+    Lader Claude inddele hvert opslag i grøn/gul/rød.
+    Alle opslag returneres med feltet 'rating'. Ved API-fejl får batchen 'unrated'.
     """
     if not jobs:
         return []
 
-    print(f"\nAI-filtrering med Claude ({len(jobs)} opslag)...")
-
-    # Behandl i batches af 10 for at holde prompt-størrelsen nede
+    print(f"\nAI-inddeling med Claude ({len(jobs)} opslag)...")
     BATCH_SIZE = 10
-    approved = []
 
     for batch_start in range(0, len(jobs), BATCH_SIZE):
         batch = jobs[batch_start:batch_start + BATCH_SIZE]
+        for job in batch:
+            job["rating"] = "unrated"
 
-        # Byg prompt med alle opslag i batchen
         job_list = ""
         for i, job in enumerate(batch):
+            desc = job.get("description") or "(ingen beskrivelse)"
             job_list += f"""
 [{i+1}] Titel: {job.get('title', '')}
      Virksomhed: {job.get('company', '')}
      Lokation: {job.get('location', '')}
-     Beskrivelse: {job.get('description', '')[:300] if job.get('description') else '(ingen beskrivelse)'}
+     Beskrivelse: {desc[:300]}
 """
 
         prompt = f"""{CANDIDATE_PROFILE}
-
-Nedenfor er {len(batch)} jobopslag. Vurder for hvert opslag om det er relevant for kandidaten.
-
-Regler:
-- GODKEND: Entry-level/junior IT-stillinger inden for ledelse, konsulentarbejde, digitalisering, forretningsanalyse, projektkoordinering, IT-strategi, change management
-- AFVIS: Stillinger der kræver 3+ års erfaring, senior/lead/chef-titler, rent tekniske udviklerstillinger (programmering/DevOps/infrastruktur), militær/forsvar-specialister, sundhedsfaglige, håndværk, ph.d.-krav, ufaglærte jobs
-- VED TVIVL: Godkend hellere end afvis – det er bedre at sende et ekstra opslag end at misse et godt match
-
-Svar KUN med en JSON-liste med numrene på de GODKENDTE opslag, f.eks.: [1, 3, 5]
-Ingen forklaring, ingen tekst – kun JSON-listen.
+{RATING_RULES}
+Svar KUN med et JSON-objekt der mapper opslagets nummer til farven, f.eks.:
+{{"1": "grøn", "2": "gul", "3": "rød"}}
+Ingen forklaring, kun JSON.
 
 Jobopslag:
 {job_list}"""
@@ -248,42 +290,31 @@ Jobopslag:
                 },
                 json={
                     "model": "claude-haiku-4-5",
-                    "max_tokens": 200,
+                    "max_tokens": 300,
                     "messages": [{"role": "user", "content": prompt}],
                 },
                 timeout=30,
             )
-
             if response.status_code == 200:
-                content = response.json()["content"][0]["text"].strip()
-                # Parse JSON-listen
-                m = re.search(r'\[[\d,\s]*\]', content)
-                if m:
-                    approved_indices = json.loads(m.group())
-                    for idx in approved_indices:
-                        if 1 <= idx <= len(batch):
-                            job = batch[idx - 1]
-                            job["ai_approved"] = True
-                            approved.append(job)
-                    rejected = len(batch) - len([i for i in approved_indices if 1 <= i <= len(batch)])
-                    print(f"  Batch {batch_start//BATCH_SIZE + 1}: {len(approved_indices)} godkendt, {rejected} afvist af Claude")
-                else:
-                    # Kan ikke parse svar – behold alle i batchen
-                    print(f"  Batch {batch_start//BATCH_SIZE + 1}: Kunne ikke parse Claude-svar, beholder alle")
-                    approved.extend(batch)
+                content = response.json()["content"][0]["text"]
+                m = re.search(r'\{.*\}', content, re.DOTALL)
+                ratings = json.loads(m.group()) if m else {}
+                for key, color in ratings.items():
+                    idx = int(str(key).strip()) - 1
+                    if 0 <= idx < len(batch):
+                        batch[idx]["rating"] = _COLOR_WORDS.get(str(color).strip().lower(), "unrated")
             else:
                 print(f"  Claude API fejl {response.status_code}: {response.text[:200]}")
-                # Fallback: behold alle ved API-fejl
-                approved.extend(batch)
-
         except Exception as e:
-            print(f"  Claude fejl: {e} – beholder alle opslag i batchen")
-            approved.extend(batch)
+            print(f"  Claude fejl: {e} – batchen markeres som ikke vurderet")
 
-        time.sleep(0.5)  # Respekter rate limits
+        counts = {c: sum(1 for j in batch if j["rating"] == c) for c in RATING_ORDER}
+        print(f"  Batch {batch_start//BATCH_SIZE + 1}: "
+              f"{counts['green']} grøn, {counts['yellow']} gul, {counts['red']} rød, "
+              f"{counts['unrated']} ikke vurderet")
+        time.sleep(0.5)
 
-    print(f"AI-filtrering færdig: {len(approved)}/{len(jobs)} opslag godkendt")
-    return approved
+    return jobs
 
 
 # ─── Søgekonfiguration ────────────────────────────────────────────────────────
@@ -324,6 +355,30 @@ HARD_EXCLUDE = [
     "pædagog", "socialrådgiver", "håndværker", "mekaniker", "bager",
     "kok", "rengøring", "lagermedarbejder", "butiksassistent",
 ]
+
+# Titelfilter: opslag hvis titel matcher et af disse mønstre sorteres fra før
+# AI-vurderingen. Mønstrene matcher fra ordstart, så danske sammensætninger
+# som "seniorkonsulent", "testleder" og "supportmedarbejder" også fanges.
+TITLE_EXCLUDE_PATTERNS = {
+    "senior":   r"\bsenior|\bsr\b\.?",
+    "test":     r"\btest|\bqa\b|quality assurance",
+    "support":  r"support|servicedesk|service desk|helpdesk|help desk",
+    "engineer": r"engineer|ingeniør",
+    "udvikler": r"(?<!business )developer|\budvikler|softwareudvikler|systemudvikler"
+                r"|webudvikler|programmør|devops|frontend|backend|full[- ]?stack",
+    "tekniker": r"tekniker|technician",
+}
+_TITLE_EXCLUDE_RE = {k: re.compile(v, re.IGNORECASE) for k, v in TITLE_EXCLUDE_PATTERNS.items()}
+
+
+def title_exclude_reason(job: dict) -> str | None:
+    """Returnerer navnet på det titelfilter der rammer opslaget, ellers None."""
+    title = job.get("title", "")
+    for name, rx in _TITLE_EXCLUDE_RE.items():
+        if rx.search(title):
+            return name
+    return None
+
 
 def hard_exclude(job: dict) -> bool:
     """Returnerer True hvis opslaget åbenlyst er irrelevant (spare AI-kald)."""
@@ -553,8 +608,9 @@ def deduplicate(jobs: list[dict]) -> list[dict]:
 
 # ─── Hoved-scraping funktion ──────────────────────────────────────────────────
 
-def collect_jobs() -> list[dict]:
-    """Samler og filtrerer alle relevante jobopslag fra alle kilder."""
+def collect_jobs() -> tuple[list[dict], list[dict]]:
+    """Samler opslag fra alle kilder og kører de hårde filtre.
+    Returnerer (beholdte opslag, frasorterede opslag med feltet 'excluded_by')."""
     all_jobs = []
 
     print(f"\n{'='*60}")
@@ -584,32 +640,33 @@ def collect_jobs() -> list[dict]:
 
     print(f"\nTotal råopslag: {len(all_jobs)}")
 
-    # Deduplicering
     unique_jobs = deduplicate(all_jobs)
     print(f"Efter deduplicering: {len(unique_jobs)}")
 
-    # Grov geografisk forfiltrering
     cph_jobs = [j for j in unique_jobs if is_copenhagen_area(j)]
     print(f"Efter geografisk filtrering (Storkøbenhavn): {len(cph_jobs)}")
 
-    # Grov hard-exclude (åbenlyse ikke-IT opslag)
-    pre_filtered = [j for j in cph_jobs if not hard_exclude(j)]
-    print(f"Efter grov forfiltrering: {len(pre_filtered)}")
+    kept, excluded = [], []
+    for job in cph_jobs:
+        if hard_exclude(job):
+            continue
+        reason = title_exclude_reason(job)
+        if reason:
+            job["excluded_by"] = reason
+            excluded.append(job)
+        else:
+            kept.append(job)
+    print(f"Efter titelfilter (senior, test, support, engineer mv.): {len(kept)} "
+          f"({len(excluded)} frasorteret)")
+    return kept, excluded
 
-    # AI-filtrering med Claude
-    api_key = get_anthropic_key()
-    if api_key:
-        final_jobs = ai_filter_jobs(pre_filtered, api_key)
-    else:
-        print("Ingen Anthropic API-nøgle – springer AI-filtrering over")
-        final_jobs = pre_filtered
 
-    final_jobs.sort(key=lambda j: (
-        {"IT Jobbank": 0, "Jobindex": 1, "StepStone": 2}.get(j["source"], 3),
-        j.get("date", ""),
-        j["title"]
+def sort_by_rating(jobs: list[dict]) -> list[dict]:
+    return sorted(jobs, key=lambda j: (
+        RATING_ORDER.get(j.get("rating", "unrated"), 3),
+        {"IT Jobbank": 0, "Jobindex": 1, "StepStone": 2}.get(j.get("source"), 3),
+        j.get("title", ""),
     ))
-    return final_jobs
 
 
 # ─── E-mail funktioner ────────────────────────────────────────────────────────
@@ -624,166 +681,83 @@ def format_date(date_str: str) -> str:
         return date_str[:10]
 
 
-def build_html_email(jobs: list[dict]) -> str:
-    today          = datetime.now().strftime("%d. %B %Y")
-    job_count      = len(jobs)
-    itjobbank_jobs = [j for j in jobs if j["source"] == "IT Jobbank"]
-    jobindex_jobs  = [j for j in jobs if j["source"] == "Jobindex"]
-    jobnet_jobs    = [j for j in jobs if j["source"] == "Jobnet"]
-    stepstone_jobs = [j for j in jobs if j["source"] == "StepStone"]
+RATING_LABELS = {
+    "green":   ("Grøn",          "#1e7d45", "#e6f4ea"),
+    "yellow":  ("Gul",           "#9a6b00", "#fdf3d8"),
+    "red":     ("Rød",           "#b3261e", "#fbe9e7"),
+    "unrated": ("Ikke vurderet", "#555555", "#f0f0f0"),
+}
 
-    source_colors = {
-        "IT Jobbank": ("#0066cc", "#e3f2fd"),
-        "Jobindex":   ("#e65100", "#fff3e0"),
-        "StepStone":  ("#c0392b", "#fdecea"),
-        "Jobnet":     ("#2e7d32", "#e8f5e9"),
-    }
+
+def build_html_email(jobs: list[dict]) -> str:
+    today = datetime.now().strftime("%d/%m/%Y")
+    jobs  = sort_by_rating(jobs)
 
     def job_card(job: dict) -> str:
-        title    = job.get("title", "")
-        company  = job.get("company", "")
-        location = job.get("location", "")
-        date     = format_date(job.get("date", ""))
-        link     = job.get("link", "")
-        category = job.get("category", "")
-        source   = job.get("source", "")
-        color, bg = source_colors.get(source, ("#555", "#f5f5f5"))
-        location_html = f'<span style="color:#666;font-size:13px;">📍 {location}</span>' if location else ""
-        date_html     = f'<span style="color:#666;font-size:13px;margin-left:12px;">📅 {date}</span>' if date else ""
-        ai_badge      = '<span style="background:#f3e5f5;color:#7b1fa2;font-size:10px;font-weight:600;padding:2px 7px;border-radius:10px;margin-left:6px;">✓ AI-godkendt</span>'
+        label, color, bg = RATING_LABELS[job.get("rating", "unrated")]
+        meta = " · ".join(x for x in [job.get("company", ""), job.get("location", ""),
+                                      job.get("source", ""), format_date(job.get("date", ""))] if x)
         return f"""
-        <div style="background:#fff;border:1px solid #e0e0e0;border-radius:8px;padding:16px 20px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.08);">
-            <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">
-                <div style="flex:1;min-width:200px;">
-                    <a href="{link}" style="color:#1a1a2e;text-decoration:none;font-size:16px;font-weight:600;line-height:1.4;">{title}</a>
-                    <div style="color:#444;font-size:14px;margin-top:4px;font-weight:500;">{company}{ai_badge}</div>
-                    <div style="margin-top:6px;">{location_html}{date_html}</div>
-                </div>
-                <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
-                    <span style="background:{bg};color:{color};font-size:11px;font-weight:600;padding:3px 8px;border-radius:12px;white-space:nowrap;">{source}</span>
-                    <span style="background:#f5f5f5;color:#555;font-size:11px;padding:3px 8px;border-radius:12px;white-space:nowrap;">{category}</span>
-                </div>
-            </div>
-            <div style="margin-top:12px;">
-                <a href="{link}" style="display:inline-block;background:#1a1a2e;color:#fff;text-decoration:none;padding:7px 16px;border-radius:6px;font-size:13px;font-weight:500;">Se opslag →</a>
-            </div>
+        <div style="background:#fff;border:1px solid #e0e0e0;border-left:5px solid {color};border-radius:6px;padding:12px 16px;margin-bottom:10px;">
+          <a href="{job.get('link', '')}" style="color:#1a1a2e;text-decoration:none;font-size:15px;font-weight:600;">{job.get('title', '')}</a>
+          <div style="color:#555;font-size:13px;margin-top:4px;">{meta}</div>
         </div>"""
 
-    def section(title: str, jobs_list: list[dict], color: str) -> str:
-        if not jobs_list:
-            return ""
-        cards = "".join(job_card(j) for j in jobs_list)
-        return f"""
-        <div style="margin-bottom:30px;">
-            <h2 style="color:{color};font-size:18px;font-weight:700;margin:0 0 16px 0;padding-bottom:8px;border-bottom:2px solid {color};">
-                {title} <span style="font-size:14px;font-weight:400;color:#666;">({len(jobs_list)} opslag)</span>
-            </h2>
-            {cards}
-        </div>"""
+    sections = ""
+    for key, (label, color, bg) in RATING_LABELS.items():
+        group = [j for j in jobs if j.get("rating", "unrated") == key]
+        if not group:
+            continue
+        cards = "".join(job_card(j) for j in group)
+        sections += f"""
+        <h2 style="color:{color};font-size:17px;margin:24px 0 10px;border-bottom:2px solid {color};padding-bottom:6px;">
+          {label} <span style="font-weight:400;color:#666;font-size:14px;">({len(group)})</span></h2>{cards}"""
 
-    no_jobs_html = """
-    <div style="text-align:center;padding:40px;color:#666;">
-        <p style="font-size:16px;">Ingen nye relevante jobopslag denne uge.</p>
-        <p style="font-size:14px;">Søgningen kører igen næste mandag.</p>
-    </div>""" if job_count == 0 else ""
+    if not jobs:
+        sections = '<p style="text-align:center;color:#666;padding:30px;">Ingen nye opslag denne uge.</p>'
 
+    counts = " · ".join(f"{RATING_LABELS[k][0]}: {sum(1 for j in jobs if j.get('rating') == k)}"
+                        for k in ("green", "yellow", "red"))
     return f"""<!DOCTYPE html>
-<html lang="da">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Ugentlig Job Alert – IT-ledelse</title>
-</head>
-<body style="margin:0;padding:0;background:#f4f6f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">
+<html lang="da"><head><meta charset="UTF-8"><title>Job Alert</title></head>
+<body style="margin:0;background:#f4f6f9;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;">
 <div style="max-width:680px;margin:0 auto;padding:20px;">
-  <div style="background:linear-gradient(135deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%);border-radius:12px 12px 0 0;padding:32px 32px 28px;text-align:center;">
-    <div style="font-size:28px;margin-bottom:8px;">💼</div>
-    <h1 style="color:#fff;font-size:22px;font-weight:700;margin:0 0 6px 0;">Ugentlig Job Alert</h1>
-    <p style="color:#a8b8d8;font-size:14px;margin:0;">IT-ledelse, cand.it · Storkøbenhavn · {today}</p>
-    <p style="color:#7b9cc8;font-size:12px;margin:6px 0 0 0;">✦ Filtreret med Claude AI</p>
+  <div style="background:#323b4c;border-radius:10px 10px 0 0;padding:24px;color:#fff;">
+    <h1 style="font-size:20px;margin:0 0 4px;">Job Alert · {today}</h1>
+    <p style="margin:0;color:#c9d1e0;font-size:13px;">{len(jobs)} nye opslag i Storkøbenhavn · {counts}</p>
   </div>
-  <div style="background:#fff;border-left:1px solid #e0e0e0;border-right:1px solid #e0e0e0;padding:16px 32px;">
-    <div style="display:flex;gap:16px;flex-wrap:wrap;">
-      <div style="text-align:center;flex:1;min-width:80px;">
-        <div style="font-size:26px;font-weight:700;color:#7b1fa2;">{job_count}</div>
-        <div style="font-size:11px;color:#666;text-transform:uppercase;letter-spacing:0.5px;">AI-godkendte</div>
-      </div>
-      <div style="text-align:center;flex:1;min-width:80px;">
-        <div style="font-size:26px;font-weight:700;color:#0066cc;">{len(itjobbank_jobs)}</div>
-        <div style="font-size:11px;color:#666;text-transform:uppercase;letter-spacing:0.5px;">IT Jobbank</div>
-      </div>
-      <div style="text-align:center;flex:1;min-width:80px;">
-        <div style="font-size:26px;font-weight:700;color:#e65100;">{len(jobindex_jobs)}</div>
-        <div style="font-size:11px;color:#666;text-transform:uppercase;letter-spacing:0.5px;">Jobindex</div>
-      </div>
-      <div style="text-align:center;flex:1;min-width:80px;">
-        <div style="font-size:26px;font-weight:700;color:#c0392b;">{len(stepstone_jobs)}</div>
-        <div style="font-size:11px;color:#666;text-transform:uppercase;letter-spacing:0.5px;">StepStone</div>
-      </div>
-    </div>
-    <p style="color:#888;font-size:12px;margin:8px 0 0 0;text-align:center;">
-      Kun nye opslag · AI-vurderet relevant for dig · Storkøbenhavn
-    </p>
+  <div style="background:#f8f9fb;border:1px solid #e0e0e0;border-top:none;border-radius:0 0 10px 10px;padding:8px 24px 24px;">
+    {sections}
   </div>
-  <div style="background:#f8f9fb;border:1px solid #e0e0e0;border-top:none;border-radius:0 0 12px 12px;padding:28px 32px;">
-    {no_jobs_html}
-    {section("IT Jobbank", itjobbank_jobs, "#0066cc")}
-    {section("Jobindex", jobindex_jobs, "#e65100")}
-    {section("StepStone", stepstone_jobs, "#c0392b")}
-    <div style="background:#fff;border:1px solid #e8e8e8;border-radius:8px;padding:16px 20px;margin-top:20px;">
-      <p style="color:#666;font-size:13px;margin:0 0 8px 0;font-weight:600;">Om denne job alert:</p>
-      <p style="color:#888;font-size:12px;margin:0;line-height:1.6;">
-        Sendes automatisk hver mandag. Hvert opslag er individuelt vurderet af <strong>Claude AI</strong>
-        som relevant for en nyuddannet kandidat i IT-ledelse (cand.it) fra AAU.
-        Opslag du allerede har fået tilsendt vises ikke igen.
-        Søgningen dækker IT Jobbank, Jobindex og StepStone i Storkøbenhavn-området.
-      </p>
-    </div>
-  </div>
-  <div style="text-align:center;padding:20px;color:#aaa;font-size:12px;">
-    <p style="margin:0;">Automatisk genereret af Job Alert · {today}</p>
-  </div>
-</div>
-</body>
-</html>"""
+</div></body></html>"""
 
 
 def build_plain_text_email(jobs: list[dict]) -> str:
-    today = datetime.now().strftime("%d. %B %Y")
-    lines = [
-        "UGENTLIG JOB ALERT – IT-ledelse, cand.it",
-        f"Storkøbenhavn · {today} · Filtreret med Claude AI",
-        "=" * 50,
-        f"{len(jobs)} AI-godkendte jobopslag (kun nye opslag)",
-        "",
-    ]
-    for job in jobs:
-        lines.append(f"TITEL:      {job.get('title', '')}")
-        lines.append(f"VIRKSOMHED: {job.get('company', '')}")
-        if job.get("location"):
-            lines.append(f"LOKATION:   {job.get('location', '')}")
-        if job.get("date"):
-            lines.append(f"DATO:       {format_date(job.get('date', ''))}")
-        lines.append(f"KILDE:      {job.get('source', '')}")
-        lines.append(f"LINK:       {job.get('link', '')}")
-        lines.append("-" * 40)
+    lines = [f"JOB ALERT · {datetime.now().strftime('%d/%m/%Y')} · {len(jobs)} nye opslag", ""]
+    for key, (label, _, _) in RATING_LABELS.items():
+        group = [j for j in sort_by_rating(jobs) if j.get("rating", "unrated") == key]
+        if not group:
+            continue
+        lines += [f"== {label.upper()} ({len(group)}) =="]
+        for job in group:
+            lines.append(f"{job.get('title', '')} · {job.get('company', '')} · {job.get('location', '')}")
+            lines.append(f"  {job.get('link', '')}")
+        lines.append("")
     return "\n".join(lines)
 
 
 def send_email(jobs: list[dict]) -> bool:
-    today   = datetime.now().strftime("%d. %B %Y")
-    subject = f"Job Alert: {len(jobs)} AI-godkendte IT-stillinger i KBH – {today}"
-
-    html_body  = build_html_email(jobs)
-    plain_body = build_plain_text_email(jobs)
+    if not RECIPIENT_EMAIL or not SENDER_EMAIL:
+        sys.exit("FEJL: RECIPIENT_EMAIL og SENDER_EMAIL skal være sat for at sende mail. Se .env.example.")
+    green   = sum(1 for j in jobs if j.get("rating") == "green")
+    subject = f"Job Alert: {len(jobs)} nye opslag ({green} grønne) – {datetime.now().strftime('%d/%m/%Y')}"
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"]    = f"Job Alert <{SENDER_EMAIL}>"
     msg["To"]      = RECIPIENT_EMAIL
-
-    msg.attach(MIMEText(plain_body, "plain", "utf-8"))
-    msg.attach(MIMEText(html_body,  "html",  "utf-8"))
+    msg.attach(MIMEText(build_plain_text_email(jobs), "plain", "utf-8"))
+    msg.attach(MIMEText(build_html_email(jobs),       "html",  "utf-8"))
 
     password = get_smtp_password()
     if not password:
@@ -811,33 +785,63 @@ def send_email(jobs: list[dict]) -> bool:
 
 # ─── Hoved-funktion ───────────────────────────────────────────────────────────
 
+def _norm_link(link: str) -> str:
+    return (link or "").split("?")[0].rstrip("/")
+
+
+def export_jobs(out_path: str, seen_path: str | None) -> None:
+    """Sky-tilstand: scrape + hårde filtre, skriv nye opslag til JSON. Ingen AI, ingen mail.
+    seen_path kan pege på en tidligere jobs.json (fra resultatsiden) eller seen_jobs.json."""
+    kept, excluded = collect_jobs()
+    seen = set()
+    if seen_path and Path(seen_path).exists():
+        data = json.loads(Path(seen_path).read_text(encoding="utf-8"))
+        seen = set(data.get("seen_links", [])) | {_norm_link(j.get("link")) for j in data.get("jobs", [])}
+    new = [j for j in kept if _norm_link(j.get("link")) not in seen]
+    new_excluded = [j for j in excluded if _norm_link(j.get("link")) not in seen]
+    for i, j in enumerate(new, 1):
+        j["id"] = i
+    Path(out_path).write_text(json.dumps(
+        {"run_at": datetime.now().isoformat(timespec="minutes"),
+         "jobs": new, "excluded": new_excluded},
+        ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"\nTidligere set: {len(seen)} · Nye: {len(new)} · Nye frasorterede: {len(new_excluded)}")
+    print(f"Skrevet til {out_path}")
+
+
 def run_job_alert() -> None:
-    """
-    Kører den komplette job alert:
-    1. Scraper jobopslag fra IT Jobbank, Jobnet og StepStone
-    2. Grov geografisk filtrering (Storkøbenhavn)
-    3. Claude AI vurderer hvert opslag individuelt
-    4. Fjerner opslag der allerede er sendt tidligere
-    5. Sender e-mail med kun NYE, AI-godkendte opslag
-    6. Gemmer de sendte opslag så de ikke sendes igen
-    """
-    all_relevant = collect_jobs()
+    """Mac-tilstand: scrape, filtrér, lad Claude inddele i grøn/gul/rød, send mail med nye opslag."""
+    kept, _ = collect_jobs()
 
     seen     = load_seen_jobs()
-    new_jobs = filter_new_jobs(all_relevant, seen)
-
+    new_jobs = filter_new_jobs(kept, seen)
     print(f"\nTidligere sendte opslag: {len(seen)}")
     print(f"Nye opslag (ikke set før): {len(new_jobs)}")
+
+    api_key = get_anthropic_key()
+    if api_key:
+        new_jobs = ai_classify_jobs(new_jobs, api_key)
+    else:
+        print("Ingen Anthropic API-nøgle – opslag sendes uden inddeling")
+        for j in new_jobs:
+            j["rating"] = "unrated"
 
     print(f"\nSender e-mail til {RECIPIENT_EMAIL}...")
     success = send_email(new_jobs)
 
     if success and new_jobs:
-        new_links = {job.get("link", "").split("?")[0].rstrip("/") for job in new_jobs if job.get("link")}
-        seen.update(new_links)
+        seen.update(_norm_link(j.get("link")) for j in new_jobs if j.get("link"))
         save_seen_jobs(seen)
-        print(f"Gemt {len(new_links)} nye opslag i hukommelsen.")
+        print(f"Gemt {len(new_jobs)} nye opslag i hukommelsen.")
 
 
 if __name__ == "__main__":
-    run_job_alert()
+    import argparse
+    ap = argparse.ArgumentParser(description="Job Alert")
+    ap.add_argument("--export", metavar="FIL", help="Skriv nye, filtrerede opslag til JSON (ingen AI, ingen mail)")
+    ap.add_argument("--seen", metavar="FIL", help="Tidligere jobs.json/seen_jobs.json at udelukke fra --export")
+    args = ap.parse_args()
+    if args.export:
+        export_jobs(args.export, args.seen)
+    else:
+        run_job_alert()

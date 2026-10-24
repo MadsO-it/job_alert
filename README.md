@@ -6,13 +6,16 @@ Bygget for at slippe for at scrolle jobsider hver dag. Det er min egen kandidat-
 
 ## Hvad det gør
 
-1. Henter aktuelle jobopslag fra 3 jobsider (begge har offentlige søgeresultater)
-2. Filtrerer groft på geografi (Storkøbenhavn) og kategori
-3. Sender hvert opslag til Claude (claude-sonnet) i batches af 10 og beder om en ja/nej-vurdering ud fra min profil
-4. Husker hvilke opslag der allerede er sendt (`seen_jobs.json`) så du ikke får dubletter
-5. Sender en HTML-mail med de godkendte opslag
+1. Henter aktuelle jobopslag fra 3 jobsider (IT Jobbank, Jobindex, StepStone)
+2. Filtrerer på geografi (Storkøbenhavn)
+3. Sorterer opslag fra hvis titlen indeholder senior, test, support, engineer, udvikler eller tekniker (`TITLE_EXCLUDE_PATTERNS`)
+4. Lader Claude inddele resten i grøn / gul / rød ud fra min profil. Intet afvises af AI'en; jeg vurderer selv til sidst
+5. Husker hvilke opslag der allerede er vist, så du ikke får dubletter
 
-Køres typisk én gang om ugen via `launchd` på macOS eller `cron` på Linux.
+To måder at køre det på:
+
+- **Lokalt (Mac):** `python job_alert.py` sender en HTML-mail grupperet efter farve. Køres ugentligt via `launchd`.
+- **I skyen:** en planlagt Claude-session følger [CLOUD_RUN.md](CLOUD_RUN.md), laver selv farvevurderingen og opdaterer en privat resultatside. Kræver hverken computer, SMTP eller API-nøgle.
 
 ## Hvorfor
 
