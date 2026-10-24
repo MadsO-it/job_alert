@@ -18,6 +18,7 @@ import smtplib
 import os
 import getpass
 import base64
+import html as html_lib
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -215,18 +216,21 @@ Kandidat-profil:
 """
 
 RATING_RULES = """
-Inddel hvert opslag i én af tre farver:
+Inddel hvert opslag i én af tre farver ud fra opslagets fulde tekst:
 
 GRØN = klart match. IT-governance, IT-portefølje, IT-strategi, forretnings- eller
   procesanalyse, proces-excellence, change management, digitalisering i komplekse
-  organisationer, IT-risiko, compliance (fx NIS2/DORA), operational/cyber resilience fra
-  en organisations- og governance-vinkel, PMO/projektkoordinering, IT-konsulent eller
-  management-konsulent inden for disse felter. Niveau: graduate, junior eller ingen
-  tydelig erfaringskrav-barriere.
+  organisationer, IT-risiko og compliance, DORA/operational resilience i finans,
+  PMO/projektkoordinering, implementerings-, IT- eller management-konsulent inden for
+  disse felter. Niveau: junior til mellem, uden et krav om mange års erfaring.
 
-GUL = delvist match eller uklart. Rollen ligger tæt på profilen men har et element der
-  taler imod (fx 3-5 års erfaring krævet, tung domæneviden, mere salg eller drift end
-  analyse, teknisk slagside), eller opslaget er for kortfattet til at afgøre det.
+GUL = delvist match eller uklart. Rollen ligger tæt på profilen, men et element taler
+  imod: fx 3-5 års erfaring krævet, tung domæneviden, mere salg eller drift end analyse,
+  teknisk slagside, eller opslaget er for kortfattet til at afgøre det.
+  Rene cybersikkerhedsroller (SOC, IAM, informationssikkerhedsofficer, sikkerhedsrådgiver
+  i en ren sikkerhedsfunktion) er gule: kandidaten vil ikke have cybersikkerhed som
+  karriereidentitet, men resilience og risiko set fra governance er relevant.
+  Graduate-programmer er også gule (kandidaten søger direkte stillinger).
 
 RØD = dårligt match. Rent tekniske roller (udvikling, infrastruktur, drift, data
   engineering), salg/marketing, økonomi/regnskab uden IT-vinkel, ledelsesroller med
@@ -234,7 +238,9 @@ RØD = dårligt match. Rent tekniske roller (udvikling, infrastruktur, drift, da
   Studenterjobs, praktikpladser og ph.d.-stillinger er også røde, da de kræver
   indskrivning på en uddannelse (kandidaten er færdiguddannet).
 
-Ved tvivl mellem to farver: vælg den mest positive.
+Ved tvivl mellem to farver: vælg den mest positive. Finans (bank, pension, forsikring),
+pharma/life science og konsulenthuse er kandidatens prioriterede brancher; ved tvivl
+trækker de op.
 """
 
 RATING_ORDER = {"green": 0, "yellow": 1, "red": 2, "unrated": 3}
@@ -268,7 +274,7 @@ def ai_classify_jobs(jobs: list[dict], api_key: str) -> list[dict]:
 [{i+1}] Titel: {job.get('title', '')}
      Virksomhed: {job.get('company', '')}
      Lokation: {job.get('location', '')}
-     Beskrivelse: {desc[:300]}
+     Beskrivelse: {desc[:1500]}
 """
 
         prompt = f"""{CANDIDATE_PROFILE}
@@ -331,16 +337,35 @@ ITJOBBANK_SEARCHES = [
 # Jobindex: Søger via /jobsoegning/storkoebenhavn?q=TERM
 # Jobdata er embedded som JSON i Stash variablen – samme metode som StepStone
 JOBINDEX_SEARCH_TERMS = [
-    "IT konsulent",
-    "digitaliseringskonsulent",
+    # Kerneprofil: governance, risiko og resilience
+    "IT governance",
+    "governance",
+    "compliance",
+    "IT risk",
+    "operational resilience",
+    "DORA",
+    "NIS2",
+    # Portefølje, PMO og proces
+    "PMO",
+    "porteføljestyring",
+    "portfolio manager",
+    "procesoptimering",
+    "process excellence",
+    "change management",
+    # Analyse, konsulent og digitalisering
+    "IT strategi",
     "forretningsanalytiker",
-    "IT koordinator",
     "business analyst",
+    "IT konsulent",
+    "implementeringskonsulent",
+    "digitaliseringskonsulent",
     "digital transformation",
-    "IT graduate",
-    "change management konsulent",
-    "systemkonsulent",
+    "IT projektkoordinator",
 ]
+
+# Jobindex sorteres efter dato, og der hentes de første sider per søgning.
+# Ved daglig kørsel dækker det alle nye opslag for selv brede søgeord.
+JOBINDEX_PAGES = 2
 
 # StepStone: bruger /job/it/?subid=XXXX&geoareaid=15182 (Storkøbenhavn)
 # subid=1008000 = IT-ledelse (43 opslag), subid=1019000 = IT-analyse
@@ -401,7 +426,7 @@ def _stash_results(stash: dict) -> list:
         )
         if results:
             return results
-    print("  ADVARSEL: Ingen resultater fundet i Stash. Sidens struktur kan være ændret igen.")
+    print("  (ingen resultater: søgningen har ingen hits, eller sidens struktur er ændret)")
     return []
 
 
@@ -409,22 +434,98 @@ def _html_to_text(raw: str, limit: int = 500) -> str:
     text = re.sub(r'<[^>]+>', ' ', raw or "")
     return re.sub(r'\s+', ' ', text).strip()[:limit]
 
+
+def _deadline(job: dict) -> str:
+    """Ansøgningsfrist fra Stash-data som YYYY-MM-DD, ellers ''."""
+    if job.get("apply_deadline_asap"):
+        return "snarest"
+    raw = str(job.get("apply_deadline") or job.get("lastdate") or "")
+    m = re.match(r"(\d{4})-?(\d{2})-?(\d{2})", raw)
+    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else ""
+
+
+# ─── Fuld opslagstekst ────────────────────────────────────────────────────────
+
+FULL_TEXT_LIMIT = 3000
+
+def _page_text(fragment: str) -> str:
+    fragment = re.sub(r'<(script|style|noscript|svg|nav|header|footer|form)\b.*?</\1>', ' ',
+                      fragment, flags=re.S | re.I)
+    fragment = re.sub(r'<br\s*/?>|</p>|</li>|</h\d>|</div>', '\n', fragment, flags=re.I)
+    text = html_lib.unescape(re.sub(r'<[^>]+>', ' ', fragment))
+    text = re.sub(r'[ \t\r\f\v]+', ' ', text)
+    return re.sub(r'\n\s*\n+', '\n', text).strip()
+
+
+def fetch_full_text(job: dict) -> str:
+    """Henter selve annoncen og returnerer dens tekst (max FULL_TEXT_LIMIT tegn).
+    Rækkefølge: JSON-LD JobPosting → Jobindex-familiens annoncecontainer → sidens synlige tekst.
+    Returnerer '' hvis siden ikke kan hentes."""
+    url = job.get("fetch_url") or job.get("link")
+    if not url:
+        return ""
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        if resp.status_code != 200:
+            return ""
+        page = resp.text
+    except Exception:
+        return ""
+
+    for block in re.findall(r'<script[^>]+application/ld\+json[^>]*>(.*?)</script>', page, re.S):
+        try:
+            data = json.loads(block)
+        except Exception:
+            continue
+        items = data if isinstance(data, list) else data.get("@graph", [data])
+        for item in items:
+            if isinstance(item, dict) and item.get("@type") == "JobPosting" and item.get("description"):
+                return _page_text(item["description"])[:FULL_TEXT_LIMIT]
+
+    start = page.find('jobtext-jobad__body')
+    if start != -1:
+        end = page.find('jobtext-jobad__sidebar', start)
+        return _page_text(page[start:end if end != -1 else start + 40000].split(">", 1)[-1])[:FULL_TEXT_LIMIT]
+
+    body = re.search(r'<main\b.*?</main>', page, re.S | re.I)
+    return _page_text(body.group(0) if body else page)[:FULL_TEXT_LIMIT]
+
+
+def add_full_texts(jobs: list[dict], workers: int = 4) -> None:
+    """Erstatter den korte beskrivelse med annoncens fulde tekst, hvor den kan hentes."""
+    from concurrent.futures import ThreadPoolExecutor
+    if not jobs:
+        return
+    print(f"\nHenter fuld annoncetekst for {len(jobs)} opslag...")
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        texts = list(pool.map(fetch_full_text, jobs))
+    ok = 0
+    for job, text in zip(jobs, texts):
+        if len(text) > len(job.get("description") or "") + 100:
+            job["description"] = text
+            ok += 1
+    print(f"  Fuld tekst hentet for {ok}/{len(jobs)} (resten beholder teaseren)")
+
 def scrape_jobindex(search_term: str) -> list[dict]:
     """Scraper Jobindex via Stash JSON variabel embedded i HTML.
     Jobindex bruger /jobsoegning/storkoebenhavn?q=TERM og embedder jobdata i siden."""
     jobs = []
     encoded = quote_plus(search_term)
-    url = f"https://www.jobindex.dk/jobsoegning/storkoebenhavn?q={encoded}"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=20)
-        if resp.status_code != 200:
-            return jobs
-        html = resp.text
-        m = re.search(r'var Stash = ({.*?});\s*//\]\]>', html, re.DOTALL)
-        if not m:
-            return jobs
-        stash = json.loads(m.group(1))
-        results = _stash_results(stash)
+        results = []
+        for page in range(1, JOBINDEX_PAGES + 1):
+            url = f"https://www.jobindex.dk/jobsoegning/storkoebenhavn?q={encoded}&sort=date&page={page}"
+            resp = requests.get(url, headers=HEADERS, timeout=20)
+            if resp.status_code != 200:
+                break
+            m = re.search(r'var Stash = ({.*?});\s*//\]\]>', resp.text, re.DOTALL)
+            if not m:
+                break
+            page_results = _stash_results(json.loads(m.group(1)))
+            results.extend(page_results)
+            if len(page_results) < 20:
+                break
+            time.sleep(0.4)
         for job in results:
             headline = job.get("headline", "")
             if not headline:
@@ -448,6 +549,8 @@ def scrape_jobindex(search_term: str) -> list[dict]:
                 "date":        date_str,
                 "location":    area,
                 "link":        share_url,
+                "fetch_url":   job.get("url", "") or share_url,
+                "deadline":    _deadline(job),
                 "source":      "Jobindex",
                 "category":    search_term,
                 "description": _html_to_text(job.get("html", "")),
@@ -458,38 +561,35 @@ def scrape_jobindex(search_term: str) -> list[dict]:
 
 
 def scrape_itjobbank(category_slug: str, location: str, category_name: str) -> list[dict]:
-    """Scraper IT Jobbank – jobdata er embedded som JSON i HTML."""
+    """Scraper IT Jobbank via Stash JSON (samme platform som Jobindex og StepStone)."""
     jobs = []
-    location_encoded = quote_plus(location.lower())
-    url = f"https://www.it-jobbank.dk/jobsoegning/{category_slug}?location={location_encoded}"
+    url = f"https://www.it-jobbank.dk/jobsoegning/{category_slug}?location={quote_plus(location.lower())}"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=20)
         resp.raise_for_status()
-        html = resp.text
-        headlines  = re.findall(r'"headline":"([^"]+)"', html)
-        share_urls = re.findall(r'"share_url":"([^"]+)"', html)
-        companies  = re.findall(r'"companytext":"([^"]+)"', html)
-        dates      = re.findall(r'"firstdate":"([^"]+)"', html)
-        areas      = re.findall(r'"area":"([^"]+)"', html)
-        descriptions = re.findall(r'"html":"((?:[^"\\]|\\.)*)"', html)
-        for i, (headline, share_url) in enumerate(zip(headlines, share_urls)):
-            clean_url = share_url.replace("\\/", "/")
-            company   = (companies[i] if i < len(companies) else "").replace("\\/", "/")
-            date      = dates[i] if i < len(dates) else ""
-            area      = areas[i] if i < len(areas) else ""
-            # Udtræk ren tekst fra HTML-beskrivelse
-            desc_raw  = descriptions[i] if i < len(descriptions) else ""
-            desc_text = re.sub(r'<[^>]+>', ' ', desc_raw.replace("\\n", " ").replace('\\"', '"'))
-            desc_text = re.sub(r'\s+', ' ', desc_text).strip()[:500]
+        m = re.search(r'var Stash = ({.*?});\s*//\]\]>', resp.text, re.DOTALL)
+        if not m:
+            print(f"  [IT Jobbank] Ingen Stash-data for '{category_name}'")
+            return jobs
+        for job in _stash_results(json.loads(m.group(1))):
+            headline = job.get("headline", "")
+            if not headline:
+                continue
+            share_url = job.get("share_url") or job.get("url", "")
+            if share_url and not share_url.startswith("http"):
+                share_url = f"https://www.it-jobbank.dk{share_url}"
+            firstdate = str(job.get("firstdate", ""))[:10].replace("-", "")
             jobs.append({
                 "title":       headline,
-                "company":     company or "Se opslag",
-                "date":        date,
-                "location":    area,
-                "link":        clean_url,
+                "company":     job.get("companytext", "") or job.get("company", {}).get("name", "") or "Se opslag",
+                "date":        f"{firstdate[:4]}-{firstdate[4:6]}-{firstdate[6:8]}" if len(firstdate) >= 8 else "",
+                "location":    job.get("area", ""),
+                "link":        share_url,
+                "fetch_url":   job.get("url", "") or share_url,
+                "deadline":    _deadline(job),
                 "source":      "IT Jobbank",
                 "category":    category_name,
-                "description": desc_text,
+                "description": _html_to_text(job.get("html", "")),
             })
     except Exception as e:
         print(f"  [IT Jobbank] Fejl ved '{category_name}': {e}")
@@ -583,6 +683,8 @@ def scrape_stepstone(category_path: str, geoarea_id, category_name: str) -> list
                 "date":        date_str,
                 "location":    location,
                 "link":        share_url,
+                "fetch_url":   job.get("url", "") or share_url,
+                "deadline":    _deadline(job),
                 "source":      "StepStone",
                 "category":    category_name,
                 "description": desc[:500],
@@ -594,15 +696,37 @@ def scrape_stepstone(category_path: str, geoarea_id, category_name: str) -> list
 
 # ─── Deduplicering ────────────────────────────────────────────────────────────
 
+def _norm_text(text: str) -> str:
+    text = html_lib.unescape(text or "").replace("\\/", "/").lower()
+    return re.sub(r"[^0-9a-zæøåäöü]+", " ", text).strip()
+
+
+def job_key(job: dict) -> tuple[str, str]:
+    """(virksomhed, titel) normaliseret, til dubletfangst på tværs af links og kilder."""
+    return _norm_text(job.get("company", "")), _norm_text(job.get("title", ""))
+
+
+def is_near_duplicate(key: tuple[str, str], known: dict[str, list[str]], threshold: float = 0.85) -> bool:
+    """Samme virksomhed og næsten samme titel (fx 'IT og ...' vs 'IT- og ...')."""
+    from difflib import SequenceMatcher
+    company, title = key
+    for other in known.get(company, []):
+        if title == other or SequenceMatcher(None, title, other).ratio() >= threshold:
+            return True
+    return False
+
+
 def deduplicate(jobs: list[dict]) -> list[dict]:
-    seen_links, seen_titles, unique = set(), set(), []
+    """Fjerner dubletter: samme link, eller samme virksomhed med næsten samme titel."""
+    seen_links, known, unique = set(), {}, []
     for job in jobs:
-        link       = job.get("link", "").split("?")[0].rstrip("/")
-        title_norm = re.sub(r'\s+', ' ', job.get("title", "").lower().strip())
-        if link and link not in seen_links and title_norm not in seen_titles:
-            seen_links.add(link)
-            seen_titles.add(title_norm)
-            unique.append(job)
+        link = job.get("link", "").split("?")[0].rstrip("/")
+        key  = job_key(job)
+        if not link or link in seen_links or is_near_duplicate(key, known):
+            continue
+        seen_links.add(link)
+        known.setdefault(key[0], []).append(key[1])
+        unique.append(job)
     return unique
 
 
@@ -793,12 +917,19 @@ def export_jobs(out_path: str, seen_path: str | None) -> None:
     """Sky-tilstand: scrape + hårde filtre, skriv nye opslag til JSON. Ingen AI, ingen mail.
     seen_path kan pege på en tidligere jobs.json (fra resultatsiden) eller seen_jobs.json."""
     kept, excluded = collect_jobs()
-    seen = set()
+    seen, known = set(), {}
     if seen_path and Path(seen_path).exists():
         data = json.loads(Path(seen_path).read_text(encoding="utf-8"))
         seen = set(data.get("seen_links", [])) | {_norm_link(j.get("link")) for j in data.get("jobs", [])}
-    new = [j for j in kept if _norm_link(j.get("link")) not in seen]
-    new_excluded = [j for j in excluded if _norm_link(j.get("link")) not in seen]
+        for company, title in data.get("seen_keys", []):
+            known.setdefault(company, []).append(title)
+
+    def is_new(job: dict) -> bool:
+        return _norm_link(job.get("link")) not in seen and not is_near_duplicate(job_key(job), known)
+
+    new = [j for j in kept if is_new(j)]
+    new_excluded = [j for j in excluded if is_new(j)]
+    add_full_texts(new)
     for i, j in enumerate(new, 1):
         j["id"] = i
     Path(out_path).write_text(json.dumps(
@@ -818,6 +949,7 @@ def run_job_alert() -> None:
     print(f"\nTidligere sendte opslag: {len(seen)}")
     print(f"Nye opslag (ikke set før): {len(new_jobs)}")
 
+    add_full_texts(new_jobs)
     api_key = get_anthropic_key()
     if api_key:
         new_jobs = ai_classify_jobs(new_jobs, api_key)
@@ -840,8 +972,19 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Job Alert")
     ap.add_argument("--export", metavar="FIL", help="Skriv nye, filtrerede opslag til JSON (ingen AI, ingen mail)")
     ap.add_argument("--seen", metavar="FIL", help="Tidligere jobs.json/seen_jobs.json at udelukke fra --export")
+    ap.add_argument("--show", metavar="FIL", help="Udskriv opslag fra en --export-fil til vurdering")
+    ap.add_argument("--start", type=int, default=1, help="Med --show: første id")
+    ap.add_argument("--count", type=int, default=25, help="Med --show: antal opslag")
+    ap.add_argument("--chars", type=int, default=1500, help="Med --show: tegn beskrivelse per opslag")
     args = ap.parse_args()
-    if args.export:
+    if args.show:
+        data = json.loads(Path(args.show).read_text(encoding="utf-8"))
+        batch = [j for j in data["jobs"] if args.start <= j["id"] < args.start + args.count]
+        for j in batch:
+            desc = re.sub(r"\s+", " ", j.get("description") or "")[:args.chars]
+            print(f"[{j['id']}] {j['title']} | {j['company']} | {j['location']} | {j['source']}\n{desc}\n")
+        print(f"-- viste id {args.start}-{args.start + len(batch) - 1} af {len(data['jobs'])}")
+    elif args.export:
         export_jobs(args.export, args.seen)
     else:
         run_job_alert()

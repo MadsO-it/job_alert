@@ -20,6 +20,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from job_alert import job_key
+
 MAX_RUNS_ON_PAGE = 12
 JOB_FIELDS = ("title", "company", "location", "source", "link", "date", "rating")
 
@@ -51,8 +53,11 @@ def build_history(history: dict, new: dict, ratings: dict) -> dict:
 
     seen = set(history.get("seen_links", []))
     seen |= {_norm_link(j["link"]) for j in jobs + excluded if j.get("link")}
+    keys = {tuple(k) for k in history.get("seen_keys", [])}
+    keys |= {job_key(j) for j in jobs + excluded}
     runs = [run] + history.get("runs", [])
-    return {"updated": run["run_at"], "seen_links": sorted(seen), "runs": runs[:MAX_RUNS_ON_PAGE]}
+    return {"updated": run["run_at"], "seen_links": sorted(seen),
+            "seen_keys": sorted(list(k) for k in keys), "runs": runs[:MAX_RUNS_ON_PAGE]}
 
 
 PAGE = r"""<title>Job Alert KBH</title>

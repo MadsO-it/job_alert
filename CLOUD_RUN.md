@@ -27,8 +27,13 @@ Resultatside: https://claude.ai/artifact/CqRmLzWfJJTaSDkE3brsbi
    ændret. Notér det i opsummeringen.
 
 4. Vurdér hvert opslag i `new.json` selv. Brug `CANDIDATE_PROFILE` og `RATING_RULES`
-   fra `job_alert.py` ordret som kriterier. Vurdér ud fra titel, virksomhed og
-   beskrivelse. Skriv resultatet til `ratings.json` som `{"<id>": "green"|"yellow"|"red"}`
+   fra `job_alert.py` ordret som kriterier. `new.json` indeholder annoncens fulde tekst;
+   læs den i portioner med
+   ```bash
+   python job_alert.py --show new.json --start 1 --count 25
+   ```
+   (derefter `--start 26` osv., til alle id'er er set). Vurdér ud fra titel, virksomhed og
+   annoncetekst. Skriv resultatet til `ratings.json` som `{"<id>": "green"|"yellow"|"red"}`
    med én nøgle per opslag. Giv ingen begrundelser; kun farven.
 
 5. Byg siden:
