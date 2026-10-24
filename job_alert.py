@@ -333,6 +333,27 @@ def hard_exclude(job: dict) -> bool:
 
 # ─── Scraping funktioner
 
+def _stash_results(stash: dict) -> list:
+    """Finder jobresultaterne i Stash-objektet.
+    Nøglen hed tidligere 'jobsearch/result_app' og hedder nu 'jobsearch/result_app/list'
+    (ændret på Jobindex og StepStone i 2026). Begge understøttes."""
+    for key in ("jobsearch/result_app/list", "jobsearch/result_app"):
+        results = (
+            stash.get(key, {})
+                 .get("storeData", {})
+                 .get("searchResponse", {})
+                 .get("results", [])
+        )
+        if results:
+            return results
+    print("  ADVARSEL: Ingen resultater fundet i Stash. Sidens struktur kan være ændret igen.")
+    return []
+
+
+def _html_to_text(raw: str, limit: int = 500) -> str:
+    text = re.sub(r'<[^>]+>', ' ', raw or "")
+    return re.sub(r'\s+', ' ', text).strip()[:limit]
+
 def scrape_jobindex(search_term: str) -> list[dict]:
     """Scraper Jobindex via Stash JSON variabel embedded i HTML.
     Jobindex bruger /jobsoegning/storkoebenhavn?q=TERM og embedder jobdata i siden."""
@@ -348,12 +369,7 @@ def scrape_jobindex(search_term: str) -> list[dict]:
         if not m:
             return jobs
         stash = json.loads(m.group(1))
-        results = (
-            stash.get("jobsearch/result_app", {})
-                 .get("storeData", {})
-                 .get("searchResponse", {})
-                 .get("results", [])
-        )
+        results = _stash_results(stash)
         for job in results:
             headline = job.get("headline", "")
             if not headline:
@@ -379,7 +395,7 @@ def scrape_jobindex(search_term: str) -> list[dict]:
                 "link":        share_url,
                 "source":      "Jobindex",
                 "category":    search_term,
-                "description": "",
+                "description": _html_to_text(job.get("html", "")),
             })
     except Exception as e:
         print(f"  [Jobindex] Fejl ved '{search_term}': {e}")
@@ -484,12 +500,7 @@ def scrape_stepstone(category_path: str, geoarea_id, category_name: str) -> list
         if not m:
             return jobs
         stash = json.loads(m.group(1))
-        results = (
-            stash.get("jobsearch/result_app", {})
-                 .get("storeData", {})
-                 .get("searchResponse", {})
-                 .get("results", [])
-        )
+        results = _stash_results(stash)
         for job in results:
             headline = job.get("headline", "")
             if not headline:
