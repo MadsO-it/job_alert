@@ -392,6 +392,7 @@ TITLE_EXCLUDE_PATTERNS = {
     "udvikler": r"(?<!business )developer|\budvikler|softwareudvikler|systemudvikler"
                 r"|webudvikler|programmør|devops|frontend|backend|full[- ]?stack",
     "tekniker": r"tekniker|technician",
+    "uopfordret": r"uopfordret|spontan|unsolicited|open application",
 }
 _TITLE_EXCLUDE_RE = {k: re.compile(v, re.IGNORECASE) for k, v in TITLE_EXCLUDE_PATTERNS.items()}
 
@@ -762,6 +763,13 @@ def collect_jobs() -> tuple[list[dict], list[dict]]:
         print(f"  {name}: {len(jobs)} opslag")
         time.sleep(0.5)
 
+    print("\nSøger på målvirksomhedernes karrieresider...")
+    try:
+        from career_sites import scrape_career_sites
+        all_jobs.extend(scrape_career_sites())
+    except Exception as e:
+        print(f"  [Karrieresider] Fejl: {e}")
+
     print(f"\nTotal råopslag: {len(all_jobs)}")
 
     unique_jobs = deduplicate(all_jobs)
@@ -788,7 +796,7 @@ def collect_jobs() -> tuple[list[dict], list[dict]]:
 def sort_by_rating(jobs: list[dict]) -> list[dict]:
     return sorted(jobs, key=lambda j: (
         RATING_ORDER.get(j.get("rating", "unrated"), 3),
-        {"IT Jobbank": 0, "Jobindex": 1, "StepStone": 2}.get(j.get("source"), 3),
+        {"Karriereside": 0, "IT Jobbank": 1, "Jobindex": 2, "StepStone": 3}.get(j.get("source"), 4),
         j.get("title", ""),
     ))
 

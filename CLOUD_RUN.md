@@ -32,7 +32,9 @@ Resultatside: https://claude.ai/artifact/CqRmLzWfJJTaSDkE3brsbi
    ```bash
    python job_alert.py --show new.json --start 1 --count 25
    ```
-   (derefter `--start 26` osv., til alle id'er er set). Vurdér ud fra titel, virksomhed og
+   (derefter `--start 26` osv., til alle id'er er set). Er der mere end 60 nye opslag,
+   så brug `--chars 400` og `--count 50`, så alt kan nås i én session; titel, virksomhed
+   og annoncens indledning er nok til farven. Vurdér ud fra titel, virksomhed og
    annoncetekst. Skriv resultatet til `ratings.json` som `{"<id>": "green"|"yellow"|"red"}`
    med én nøgle per opslag. Giv ingen begrundelser; kun farven.
 

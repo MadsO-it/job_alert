@@ -144,7 +144,7 @@ footer { color: var(--muted); font-size: 12px; }
 </style>
 
 <header><div class="wrap">
-  <div class="eyebrow">Storkøbenhavn · IT Jobbank, Jobindex, StepStone</div>
+  <div class="eyebrow">Storkøbenhavn · Jobindex, IT Jobbank, StepStone og 28 karrieresider</div>
   <h1>Job Alert KBH</h1>
   <p class="sub" id="sub"></p>
 </div></header>
@@ -168,7 +168,7 @@ const DATA = JSON.parse(document.getElementById("data").textContent);
 const LABEL = { green: "Grøn", yellow: "Gul", red: "Rød", unrated: "Ikke vurderet" };
 const ORDER = ["green", "yellow", "red", "unrated"];
 const FILTER_NAMES = { senior: "senior", test: "test", support: "support", engineer: "engineer",
-  udvikler: "udvikler", tekniker: "tekniker" };
+  udvikler: "udvikler", tekniker: "tekniker", uopfordret: "uopfordret" };
 let show = { green: true, yellow: true, red: false, unrated: true };
 try { const s = JSON.parse(localStorage.getItem("show") || "null"); if (s) show = { ...show, ...s }; } catch (e) {}
 
