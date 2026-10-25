@@ -369,6 +369,11 @@ JOBINDEX_SEARCH_TERMS = [
 # Ved daglig kørsel dækker det alle nye opslag for selv brede søgeord.
 JOBINDEX_PAGES = 2
 
+# Backfill: sættes af --since. Når CUTOFF_DATE er sat, hentes der flere sider
+# (op til BACKFILL_MAX_PAGES), indtil opslagene er ældre end cutoff.
+CUTOFF_DATE: str = ""        # "YYYY-MM-DD" eller "" (dagligt: ingen cutoff)
+BACKFILL_MAX_PAGES = 15
+
 # StepStone: bruger /job/it/?subid=XXXX&geoareaid=15182 (Storkøbenhavn)
 # subid=1008000 = IT-ledelse (43 opslag), subid=1019000 = IT-analyse
 # Henter alle IT-opslag fra /job/it/ og lader Claude filtrere
@@ -436,6 +441,35 @@ def _stash_results(stash: dict) -> list:
 def _html_to_text(raw: str, limit: int = 500) -> str:
     text = re.sub(r'<[^>]+>', ' ', raw or "")
     return re.sub(r'\s+', ' ', text).strip()[:limit]
+
+
+def _stash_date(value) -> str:
+    """firstdate fra Stash ('2026-10-23...' eller '20261023') som YYYY-MM-DD, ellers ''."""
+    digits = re.sub(r"\D", "", str(value or ""))[:8]
+    return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}" if len(digits) == 8 else ""
+
+
+def _fetch_stash_pages(make_url, default_pages: int, page_size: int) -> list:
+    """Henter Stash-resultater side for side. Uden CUTOFF_DATE hentes default_pages sider.
+    Med CUTOFF_DATE fortsættes til en side er ældre end cutoff (højst BACKFILL_MAX_PAGES)."""
+    max_pages = BACKFILL_MAX_PAGES if CUTOFF_DATE else default_pages
+    results = []
+    for page in range(1, max_pages + 1):
+        resp = requests.get(make_url(page), headers=HEADERS, timeout=20)
+        if resp.status_code != 200:
+            break
+        m = re.search(r'var Stash = ({.*?});\s*//\]\]>', resp.text, re.DOTALL)
+        if not m:
+            break
+        page_results = _stash_results(json.loads(m.group(1)))
+        results.extend(page_results)
+        if len(page_results) < page_size:
+            break
+        dates = [d for d in (_stash_date(r.get("firstdate")) for r in page_results) if d]
+        if CUTOFF_DATE and dates and max(dates) < CUTOFF_DATE:
+            break
+        time.sleep(0.4)
+    return results
 
 
 def _deadline(job: dict) -> str:
@@ -534,35 +568,17 @@ def scrape_jobindex(search_term: str) -> list[dict]:
     jobs = []
     encoded = quote_plus(search_term)
     try:
-        results = []
-        for page in range(1, JOBINDEX_PAGES + 1):
-            url = f"https://www.jobindex.dk/jobsoegning/storkoebenhavn?q={encoded}&sort=date&page={page}"
-            resp = requests.get(url, headers=HEADERS, timeout=20)
-            if resp.status_code != 200:
-                break
-            m = re.search(r'var Stash = ({.*?});\s*//\]\]>', resp.text, re.DOTALL)
-            if not m:
-                break
-            page_results = _stash_results(json.loads(m.group(1)))
-            results.extend(page_results)
-            if len(page_results) < 20:
-                break
-            time.sleep(0.4)
+        results = _fetch_stash_pages(
+            lambda page: f"https://www.jobindex.dk/jobsoegning/storkoebenhavn?q={encoded}&sort=date&page={page}",
+            JOBINDEX_PAGES, 20)
         for job in results:
             headline = job.get("headline", "")
             if not headline:
                 continue
             company   = job.get("companytext", "") or job.get("company", {}).get("name", "")
             share_url = job.get("share_url", job.get("url", ""))
-            firstdate = job.get("firstdate", "")
             area      = job.get("area", "")
-            date_str  = ""
-            if firstdate:
-                try:
-                    d = str(firstdate)[:8]
-                    date_str = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
-                except Exception:
-                    pass
+            date_str  = _stash_date(job.get("firstdate"))
             if share_url and not share_url.startswith("http"):
                 share_url = f"https://www.jobindex.dk{share_url}"
             jobs.append({
@@ -585,26 +601,19 @@ def scrape_jobindex(search_term: str) -> list[dict]:
 def scrape_itjobbank(category_slug: str, location: str, category_name: str) -> list[dict]:
     """Scraper IT Jobbank via Stash JSON (samme platform som Jobindex og StepStone)."""
     jobs = []
-    url = f"https://www.it-jobbank.dk/jobsoegning/{category_slug}?location={quote_plus(location.lower())}"
+    base = f"https://www.it-jobbank.dk/jobsoegning/{category_slug}?location={quote_plus(location.lower())}"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=20)
-        resp.raise_for_status()
-        m = re.search(r'var Stash = ({.*?});\s*//\]\]>', resp.text, re.DOTALL)
-        if not m:
-            print(f"  [IT Jobbank] Ingen Stash-data for '{category_name}'")
-            return jobs
-        for job in _stash_results(json.loads(m.group(1))):
+        for job in _fetch_stash_pages(lambda page: f"{base}&page={page}", 1, 25):
             headline = job.get("headline", "")
             if not headline:
                 continue
             share_url = job.get("share_url") or job.get("url", "")
             if share_url and not share_url.startswith("http"):
                 share_url = f"https://www.it-jobbank.dk{share_url}"
-            firstdate = str(job.get("firstdate", ""))[:10].replace("-", "")
             jobs.append({
                 "title":       headline,
                 "company":     job.get("companytext", "") or job.get("company", {}).get("name", "") or "Se opslag",
-                "date":        f"{firstdate[:4]}-{firstdate[4:6]}-{firstdate[6:8]}" if len(firstdate) >= 8 else "",
+                "date":        _stash_date(job.get("firstdate")),
                 "location":    job.get("area", ""),
                 "link":        share_url,
                 "fetch_url":   job.get("url", "") or share_url,
@@ -665,37 +674,20 @@ def scrape_stepstone(category_path: str, geoarea_id, category_name: str) -> list
     Bruger /job/it/?geoareaid=15182 (Storkøbenhavn) for at få geografisk filtrering på serversiden."""
     jobs = []
     # Byg URL med geografisk filter (Storkøbenhavn = 15182)
-    if geoarea_id:
-        url = f"https://www.stepstone.dk/job/{category_path}/?geoareaid={geoarea_id}"
-    else:
-        url = f"https://www.stepstone.dk/job/{category_path}/"
+    base = f"https://www.stepstone.dk/job/{category_path}/?" + (f"geoareaid={geoarea_id}&" if geoarea_id else "")
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=20)
-        if resp.status_code != 200:
-            return jobs
-        m = re.search(r'var Stash = ({.*?});\s*//\]\]>', resp.text, re.DOTALL)
-        if not m:
-            return jobs
-        stash = json.loads(m.group(1))
-        results = _stash_results(stash)
+        results = _fetch_stash_pages(lambda page: f"{base}page={page}", 1, 25)
         for job in results:
             headline = job.get("headline", "")
             if not headline:
                 continue
             company   = job.get("company", {}).get("name", "") or job.get("workplace_company", {}).get("name", "")
             share_url = job.get("share_url", job.get("url", ""))
-            firstdate = job.get("firstdate", "")
             addresses = job.get("addresses", [])
             city      = addresses[0].get("city", "") if addresses else ""
             area      = job.get("area", "")
             location  = city or area or ""
-            date_str  = ""
-            if firstdate:
-                try:
-                    d = str(firstdate)[:8]
-                    date_str = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
-                except Exception:
-                    pass
+            date_str  = _stash_date(job.get("firstdate"))
             if share_url and not share_url.startswith("http"):
                 share_url = f"https://www.stepstone.dk{share_url}"
             desc = job.get("companytext", "") or ""
@@ -795,6 +787,10 @@ def collect_jobs() -> tuple[list[dict], list[dict]]:
         print(f"  [Karrieresider] Fejl: {e}")
 
     print(f"\nTotal råopslag: {len(all_jobs)}")
+
+    if CUTOFF_DATE:
+        all_jobs = [j for j in all_jobs if not j.get("date") or j["date"] >= CUTOFF_DATE]
+        print(f"Efter datofilter (fra {CUTOFF_DATE}): {len(all_jobs)}")
 
     unique_jobs = deduplicate(all_jobs)
     print(f"Efter deduplicering: {len(unique_jobs)}")
@@ -1004,11 +1000,16 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Job Alert")
     ap.add_argument("--export", metavar="FIL", help="Skriv nye, filtrerede opslag til JSON (ingen AI, ingen mail)")
     ap.add_argument("--seen", metavar="FIL", help="Tidligere jobs.json/seen_jobs.json at udelukke fra --export")
+    ap.add_argument("--since", type=int, metavar="DAGE",
+                    help="Backfill: hent flere sider tilbage og behold opslag fra de sidste DAGE dage")
     ap.add_argument("--show", metavar="FIL", help="Udskriv opslag fra en --export-fil til vurdering")
     ap.add_argument("--start", type=int, default=1, help="Med --show: første id")
     ap.add_argument("--count", type=int, default=25, help="Med --show: antal opslag")
     ap.add_argument("--chars", type=int, default=1500, help="Med --show: tegn beskrivelse per opslag")
     args = ap.parse_args()
+    if args.since:
+        from datetime import timedelta
+        CUTOFF_DATE = (datetime.now(ZoneInfo("Europe/Copenhagen")) - timedelta(days=args.since)).strftime("%Y-%m-%d")
     if args.show:
         data = json.loads(Path(args.show).read_text(encoding="utf-8"))
         batch = [j for j in data["jobs"] if args.start <= j["id"] < args.start + args.count]
