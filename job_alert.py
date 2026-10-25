@@ -20,6 +20,7 @@ import getpass
 import base64
 import html as html_lib
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from urllib.parse import quote_plus
@@ -140,7 +141,7 @@ HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "da-DK,da;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": "gzip, deflate",
 }
 
 # ─── Geografisk grov-filtrering ───────────────────────────────────────────────
@@ -169,6 +170,7 @@ NON_CPH_LOCATIONS = [
     "fyn", "jylland", "midtjylland", "nordjylland", "sydjylland", "sønderjylland",
     "hobro", "ringe", "vojens", "hedensted", "risskov", "lystrup", "viby j", "skanderborg",
     "karup", "warsaw", "hinnerup", "brabrand", "aabybro", "frederikshavn", "grenaa",
+    "århus", "viby", "kalundborg", "vordingborg", "syddanmark", "kolding",
 ]
 
 # Generiske ord der ikke siger noget om byen. Tæller kun som KBH hvis ingen
@@ -472,6 +474,8 @@ def fetch_full_text(job: dict) -> str:
         page = resp.text
     except Exception:
         return ""
+    if page.count("\ufffd") > 20:
+        return ""   # binært eller forkert afkodet svar
 
     for block in re.findall(r'<script[^>]+application/ld\+json[^>]*>(.*?)</script>', page, re.S):
         try:
@@ -483,13 +487,30 @@ def fetch_full_text(job: dict) -> str:
             if isinstance(item, dict) and item.get("@type") == "JobPosting" and item.get("description"):
                 return _page_text(item["description"])[:FULL_TEXT_LIMIT]
 
+    # SuccessFactors-karrieresider (Novo, Ambu, Tryg, Lundbeck, Nordea, Systematic m.fl.)
+    start = page.find('itemprop="description"')
+    if start != -1:
+        text = _page_text(page[start:start + 60000].split(">", 1)[-1].split('id="reqdescription"')[0])
+        if len(text) > 200:
+            return text[:FULL_TEXT_LIMIT]
+
+    # Talentsoft (Nykredit, PensionDanmark)
+    parts = re.findall(r'id="fldjobdescription_(?:description\d|primaryprofile)"[^>]*>(.*?)</div>', page, re.S)
+    if parts:
+        text = _page_text("\n".join(parts))
+        if len(text) > 200:
+            return text[:FULL_TEXT_LIMIT]
+
     start = page.find('jobtext-jobad__body')
     if start != -1:
         end = page.find('jobtext-jobad__sidebar', start)
         return _page_text(page[start:end if end != -1 else start + 40000].split(">", 1)[-1])[:FULL_TEXT_LIMIT]
 
     body = re.search(r'<main\b.*?</main>', page, re.S | re.I)
-    return _page_text(body.group(0) if body else page)[:FULL_TEXT_LIMIT]
+    text = _page_text(body.group(0) if body else page)
+    if re.search(r'cookie', text[:600], re.I):
+        return ""   # sidetekst er cookie-/navigationsstøj; behold teaseren
+    return text[:FULL_TEXT_LIMIT]
 
 
 def add_full_texts(jobs: list[dict], workers: int = 4) -> None:
@@ -702,9 +723,12 @@ def _norm_text(text: str) -> str:
     return re.sub(r"[^0-9a-zæøåäöü]+", " ", text).strip()
 
 
+_COMPANY_SUFFIX = re.compile(r"\b(a s|aps|as|a/s|i s|p s|amba|ab|asa|oyj|plc|ltd|gmbh|danmark|denmark)\b")
+
 def job_key(job: dict) -> tuple[str, str]:
     """(virksomhed, titel) normaliseret, til dubletfangst på tværs af links og kilder."""
-    return _norm_text(job.get("company", "")), _norm_text(job.get("title", ""))
+    company = _COMPANY_SUFFIX.sub(" ", _norm_text(job.get("company", "")))
+    return re.sub(r"\s+", " ", company).strip(), _norm_text(job.get("title", ""))
 
 
 def is_near_duplicate(key: tuple[str, str], known: dict[str, list[str]], threshold: float = 0.85) -> bool:
@@ -941,7 +965,7 @@ def export_jobs(out_path: str, seen_path: str | None) -> None:
     for i, j in enumerate(new, 1):
         j["id"] = i
     Path(out_path).write_text(json.dumps(
-        {"run_at": datetime.now().isoformat(timespec="minutes"),
+        {"run_at": datetime.now(ZoneInfo("Europe/Copenhagen")).isoformat(timespec="minutes"),
          "jobs": new, "excluded": new_excluded},
         ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\nTidligere set: {len(seen)} · Nye: {len(new)} · Nye frasorterede: {len(new_excluded)}")
