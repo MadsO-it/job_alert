@@ -25,6 +25,8 @@ Resultatside: https://claude.ai/artifact/CqRmLzWfJJTaSDkE3brsbi
    ```
    Hvis en kilde giver 0 opslag på alle søgninger, er sidens struktur sandsynligvis
    ændret. Notér det i opsummeringen.
+   Antal opslag pr. kilde gemmes i `new.json` under `sources` og vises som
+   kildestatus nederst på resultatsiden; kilder med 0 eller fejl markeres med rødt.
 
 4. Vurdér hvert opslag i `new.json` selv. Brug `CANDIDATE_PROFILE` og `RATING_RULES`
    fra `job_alert.py` ordret som kriterier. `new.json` indeholder annoncens fulde tekst;

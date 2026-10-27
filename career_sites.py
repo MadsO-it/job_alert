@@ -658,9 +658,11 @@ def _short_error(e: Exception) -> str:
     return f"{type(e).__name__}: {e}"[:120]
 
 
-def scrape_career_sites() -> list[dict]:
+def scrape_career_sites(status: list | None = None) -> list[dict]:
     """Henter opslag fra alle arbejdsgivere i EMPLOYERS. En fejl hos én arbejdsgiver
-    stopper aldrig de øvrige. Max MAX_PER_EMPLOYER opslag pr. arbejdsgiver."""
+    stopper aldrig de øvrige. Max MAX_PER_EMPLOYER opslag pr. arbejdsgiver.
+    Hvis status er en liste, tilføjes én linje pr. arbejdsgiver:
+    {"name", "count", "error"} (error er "" når kaldet lykkedes)."""
     all_jobs = []
     for i, cfg in enumerate(EMPLOYERS):
         if i:
@@ -676,8 +678,12 @@ def scrape_career_sites() -> list[dict]:
             unique = unique[:MAX_PER_EMPLOYER]
             print(f"  {cfg['name']}: {len(unique)} opslag")
             all_jobs.extend(unique)
+            if status is not None:
+                status.append({"name": cfg["name"], "count": len(unique), "error": ""})
         except Exception as e:  # noqa: BLE001 — én arbejdsgiver må aldrig vælte resten
             print(f"  {cfg['name']}: fejl {_short_error(e)}")
+            if status is not None:
+                status.append({"name": cfg["name"], "count": 0, "error": _short_error(e)})
     return all_jobs
 
 

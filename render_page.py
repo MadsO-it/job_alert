@@ -49,7 +49,7 @@ def build_history(history: dict, new: dict, ratings: dict) -> dict:
         for j in new.get("excluded", [])
     ]
     run = {"run_at": new.get("run_at") or datetime.now().isoformat(timespec="minutes"),
-           "jobs": jobs, "excluded": excluded}
+           "jobs": jobs, "excluded": excluded, "sources": new.get("sources") or {}}
 
     seen = set(history.get("seen_links", []))
     seen |= {_norm_link(j["link"]) for j in jobs + excluded if j.get("link")}
@@ -141,6 +141,8 @@ details ul { margin: 10px 0 0; padding-left: 18px; color: var(--muted); font-siz
 details a { color: var(--muted); }
 .tag { font-family: var(--font-display); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
 footer { color: var(--muted); font-size: 12px; }
+#src.warn summary { color: var(--red); font-weight: 700; }
+#src li.bad { color: var(--red); }
 </style>
 
 <header><div class="wrap">
@@ -159,6 +161,7 @@ footer { color: var(--muted); font-size: 12px; }
   </div>
   <div id="list"></div>
   <details id="excl"><summary id="excl-sum"></summary><ul id="excl-list"></ul></details>
+  <details id="src"><summary id="src-sum"></summary><ul id="src-list"></ul></details>
   <footer>Farverne er Claudes forslag ud fra din profil. Grøn: klart match. Gul: delvist eller uklart. Rød: dårligt match.</footer>
 </div></main>
 
@@ -218,7 +221,39 @@ function render() {
   const ul = document.getElementById("excl-list"); ul.replaceChildren();
   ex.forEach(j => { const li = el("li"); li.append(el("span", { class: "tag" }, (FILTER_NAMES[j.excluded_by] || j.excluded_by) + " · "));
     li.append(el("a", { href: j.link, target: "_blank", rel: "noopener" }, j.title)); if (j.company) li.append(` · ${j.company}`); ul.append(li); });
+
+  renderSources(run);
+  const nBad = sourceProblems(run.sources || {}).length;
+  if (nBad) document.getElementById("sub").textContent += ` · ${nBad} ${nBad === 1 ? "kilde" : "kilder"} uden opslag`;
 }
+
+function sourceProblems(src) {
+  const boards = (src.boards || []).filter(b => !b.count).map(b => ({ name: b.name, why: "0 opslag" }));
+  const sites = (src.career_sites || []).filter(c => c.error || !c.count)
+    .map(c => ({ name: c.name, why: c.error ? `fejl: ${c.error}` : "0 opslag" }));
+  return boards.concat(sites);
+}
+
+function renderSources(run) {
+  const src = run.sources || {};
+  const box = document.getElementById("src");
+  const boards = src.boards || [], sites = src.career_sites || [];
+  box.hidden = !boards.length && !sites.length;
+  if (box.hidden) return;
+  const problems = sourceProblems(src);
+  box.classList.toggle("warn", problems.length > 0);
+  document.getElementById("src-sum").textContent = problems.length
+    ? `Kildestatus: ${problems.length} ${problems.length === 1 ? "kilde" : "kilder"} uden opslag (${problems.map(p => p.name).join(", ")})`
+    : `Kildestatus: alle ${boards.length} jobportaler og ${sites.length} karrieresider svarede`;
+  const ul = document.getElementById("src-list"); ul.replaceChildren();
+  boards.forEach(b => {
+    const extra = b.searches > 1 ? ` (${b.searches} søgninger${b.empty_searches ? `, ${b.empty_searches} uden hits` : ""})` : "";
+    ul.append(el("li", b.count ? {} : { class: "bad" }, `${b.name} · ${b.count} opslag${extra}`));
+  });
+  sites.forEach(c => ul.append(el("li", c.error || !c.count ? { class: "bad" } : {},
+    `${c.name} · ${c.error ? "fejl: " + c.error : c.count + " opslag"}`)));
+}
+
 runSel.onchange = render;
 render();
 </script>

@@ -749,10 +749,23 @@ def deduplicate(jobs: list[dict]) -> list[dict]:
 
 # ─── Hoved-scraping funktion ──────────────────────────────────────────────────
 
+# Kildestatus for seneste collect_jobs(): én linje pr. jobportal og pr. karriereside.
+# Skrives til --export-filen, så resultatsiden kan vise kilder der gav 0 eller fejlede.
+SOURCE_STATUS: dict = {}
+
+
+def _board_status(name: str, counts: list[int]) -> dict:
+    return {"name": name, "count": sum(counts), "searches": len(counts),
+            "empty_searches": sum(1 for c in counts if c == 0)}
+
+
 def collect_jobs() -> tuple[list[dict], list[dict]]:
     """Samler opslag fra alle kilder og kører de hårde filtre.
-    Returnerer (beholdte opslag, frasorterede opslag med feltet 'excluded_by')."""
+    Returnerer (beholdte opslag, frasorterede opslag med feltet 'excluded_by').
+    Antal råopslag pr. kilde gemmes i SOURCE_STATUS."""
     all_jobs = []
+    board_counts: dict[str, list[int]] = {"Jobindex": [], "IT Jobbank": [], "StepStone": []}
+    career_status: list[dict] = []
 
     print(f"\n{'='*60}")
     print(f"Job Alert Scraper – {datetime.now().strftime('%d/%m/%Y %H:%M')}")
@@ -762,6 +775,7 @@ def collect_jobs() -> tuple[list[dict], list[dict]]:
     for slug, location, name in ITJOBBANK_SEARCHES:
         jobs = scrape_itjobbank(slug, location, name)
         all_jobs.extend(jobs)
+        board_counts["IT Jobbank"].append(len(jobs))
         print(f"  {name}: {len(jobs)} opslag")
         time.sleep(0.5)
 
@@ -769,6 +783,7 @@ def collect_jobs() -> tuple[list[dict], list[dict]]:
     for term in JOBINDEX_SEARCH_TERMS:
         jobs = scrape_jobindex(term)
         all_jobs.extend(jobs)
+        board_counts["Jobindex"].append(len(jobs))
         print(f"  '{term}': {len(jobs)} opslag")
         time.sleep(0.8)
 
@@ -776,15 +791,23 @@ def collect_jobs() -> tuple[list[dict], list[dict]]:
     for path, geoid, name in STEPSTONE_SEARCHES:
         jobs = scrape_stepstone(path, geoid, name)
         all_jobs.extend(jobs)
+        board_counts["StepStone"].append(len(jobs))
         print(f"  {name}: {len(jobs)} opslag")
         time.sleep(0.5)
 
     print("\nSøger på målvirksomhedernes karrieresider...")
     try:
         from career_sites import scrape_career_sites
-        all_jobs.extend(scrape_career_sites())
+        all_jobs.extend(scrape_career_sites(career_status))
     except Exception as e:
         print(f"  [Karrieresider] Fejl: {e}")
+        career_status = [{"name": "Karrieresider (alle)", "count": 0, "error": str(e)[:120]}]
+
+    SOURCE_STATUS.clear()
+    SOURCE_STATUS.update({
+        "boards": [_board_status(n, c) for n, c in board_counts.items()],
+        "career_sites": career_status,
+    })
 
     print(f"\nTotal råopslag: {len(all_jobs)}")
 
@@ -962,7 +985,7 @@ def export_jobs(out_path: str, seen_path: str | None) -> None:
         j["id"] = i
     Path(out_path).write_text(json.dumps(
         {"run_at": datetime.now(ZoneInfo("Europe/Copenhagen")).isoformat(timespec="minutes"),
-         "jobs": new, "excluded": new_excluded},
+         "jobs": new, "excluded": new_excluded, "sources": SOURCE_STATUS},
         ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\nTidligere set: {len(seen)} · Nye: {len(new)} · Nye frasorterede: {len(new_excluded)}")
     print(f"Skrevet til {out_path}")
