@@ -9,6 +9,8 @@ Brug:
   ratings.json  {"<id>": "green"|"yellow"|"red", ...} sat af Claude ud fra
                 CANDIDATE_PROFILE og RATING_RULES i job_alert.py
   jobs.json     forrige kørsels historik (hentes fra resultatsiden), valgfri
+  contacts.json dagens kontaktpersoner (se CLOUD_RUN.md), valgfri; gemmes i kørslen, så
+                merge_contacts.py kan indhente dage hvor kontaktarket ikke blev opdateret
 
 Siden viser de seneste kørsler med grøn/gul/rød-inddeling. Historikken
 (alle tidligere sete links) gemmes i jobs.json, så næste kørsel kun tager nye opslag.
@@ -36,7 +38,7 @@ def _norm_link(link: str) -> str:
     return (link or "").split("?")[0].rstrip("/")
 
 
-def build_history(history: dict, new: dict, ratings: dict) -> dict:
+def build_history(history: dict, new: dict, ratings: dict, contacts: list | None = None) -> dict:
     jobs = []
     for j in new.get("jobs", []):
         rating = ratings.get(str(j.get("id")), "unrated")
@@ -48,8 +50,10 @@ def build_history(history: dict, new: dict, ratings: dict) -> dict:
          "link": _clean(j.get("link")), "excluded_by": j.get("excluded_by", "")}
         for j in new.get("excluded", [])
     ]
-    run = {"run_at": new.get("run_at") or datetime.now().isoformat(timespec="minutes"),
-           "jobs": jobs, "excluded": excluded, "sources": new.get("sources") or {}}
+    run_at = new.get("run_at") or datetime.now().isoformat(timespec="minutes")
+    contacts = [dict(c, date=c.get("date") or run_at[:10]) for c in (contacts or [])]
+    run = {"run_at": run_at, "jobs": jobs, "excluded": excluded, "sources": new.get("sources") or {},
+           "contacts": contacts}
 
     seen = set(history.get("seen_links", []))
     seen |= {_norm_link(j["link"]) for j in jobs + excluded if j.get("link")}
@@ -430,6 +434,7 @@ def main() -> None:
     ap.add_argument("--new")
     ap.add_argument("--ratings")
     ap.add_argument("--history")
+    ap.add_argument("--contacts", help="contacts.json fra dagens kørsel; gemmes i kørslen i jobs.json")
     ap.add_argument("--rerender", metavar="JOBS_JSON",
                     help="Byg kun siden igen ud fra en eksisterende jobs.json (ingen ny kørsel)")
     ap.add_argument("--out-dir", required=True)
@@ -452,7 +457,8 @@ def main() -> None:
     if args.history and Path(args.history).exists():
         history = json.loads(Path(args.history).read_text(encoding="utf-8"))
 
-    result = build_history(history, new, ratings)
+    contacts = json.loads(Path(args.contacts).read_text(encoding="utf-8")) if args.contacts else []
+    result = build_history(history, new, ratings, contacts)
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     (out / "jobs.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")

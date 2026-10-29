@@ -494,22 +494,93 @@ def _page_text(fragment: str) -> str:
     return re.sub(r'\n\s*\n+', '\n', text).strip()
 
 
-def fetch_full_text(job: dict) -> str:
-    """Henter selve annoncen og returnerer dens tekst (max FULL_TEXT_LIMIT tegn).
-    Rækkefølge: JSON-LD JobPosting → Jobindex-familiens annoncecontainer → sidens synlige tekst.
-    Returnerer '' hvis siden ikke kan hentes."""
+CONTACT_LIMIT = 1400
+_CONTACT_CUES = re.compile(
+    r"kontakt|spørgsmål|vil du vide mere|hører gerne fra|høre mere|yderligere oplysninger|uddybende|"
+    r"ring til|ringe til|tlf\.|telefon|\bcontact\b|questions|reach out|more information|"
+    r"hiring manager|recruiter|talent acquisition|nærmeste leder|kommende leder|din leder bliver|"
+    r"you will report to|reporting to|du refererer til|du kommer til at referere", re.I)
+
+
+def extract_contact(text: str) -> str:
+    """Uddrag af annoncen omkring kontaktoplysninger og nærmeste leder (højst CONTACT_LIMIT tegn).
+    Returnerer '' hvis annoncen ikke nævner nogen."""
+    if not text:
+        return ""
+    spans = []
+    for m in _CONTACT_CUES.finditer(text):
+        a, b = max(0, m.start() - 160), min(len(text), m.end() + 260)
+        if spans and a <= spans[-1][1]:
+            spans[-1][1] = max(spans[-1][1], b)
+        else:
+            spans.append([a, b])
+    parts = [re.sub(r"\s+", " ", text[a:b]).strip() for a, b in spans]
+    out = " … ".join(parts)
+    if len(out) > CONTACT_LIMIT:   # kontaktlinjen står typisk sidst; behold også starten
+        out = out[:CONTACT_LIMIT // 3] + " … " + out[-(CONTACT_LIMIT * 2 // 3):]
+    return out
+
+
+def _decode(resp) -> str:
+    """Sidens tekst. Uden charset i headeren gætter requests på latin-1, hvilket gør 'ü' til 'Ã¼';
+    så prøves UTF-8 først."""
+    if "charset" not in resp.headers.get("content-type", "").lower():
+        try:
+            return resp.content.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+    return resp.text
+
+
+def _contact_card(page: str) -> str:
+    """Jobindex-familiens kontaktkort ("Kontaktperson" i sidebaren) som 'Navn, titel, tlf, mail'."""
+    out = []
+    for block in re.findall(r'class="jobtext-contactperson"(.*?)</ul>', page, re.S):
+        name = re.search(r'jobtext-contactperson__name"[^>]*>(.*?)</', block, re.S)
+        title = re.search(r'jobtext-contactperson__(?:title|position)"[^>]*>(.*?)</', block, re.S)
+        tel = re.search(r'href="tel:([^"]+)"', block)
+        mail = re.search(r'href="mailto:([^"?]+)', block)
+        parts = [html_lib.unescape(re.sub(r"<[^>]+>|\s+", " ", m.group(1))).strip()
+                 for m in (name, title) if m]
+        if tel:
+            parts.append("tlf. " + requests.utils.unquote(tel.group(1)).strip())
+        if mail:
+            parts.append(mail.group(1).strip())
+        if parts:
+            out.append(", ".join(p for p in parts if p))
+    return "; ".join(out)
+
+
+def fetch_ad(job: dict) -> dict:
+    """Henter selve annoncen. Returnerer {"text": annoncetekst (uafkortet), "page": sidens synlige
+    tekst, "card": Jobindex-familiens kontaktkort}. Rækkefølge for "text": JSON-LD JobPosting → karrieresidernes beskrivelsesfelter →
+    Jobindex-familiens annoncecontainer → sidens synlige tekst. Tomme strenge hvis siden ikke kan hentes."""
+    empty = {"text": "", "page": "", "card": ""}
     url = job.get("fetch_url") or job.get("link")
     if not url:
-        return ""
+        return empty
+    # Jobindex-familien: selve annoncen (med kontaktkort) ligger på /jobannonce/<id>;
+    # /vis-job/ og /c?t= viser for mange opslag kun en teaser.
+    jix = re.search(r"https?://(?:www\.)?(jobindex\.dk|it-jobbank\.dk|stepstone\.dk)/"
+                    r"(?:vis-job|jobannonce)/([a-z]\d+)", job.get("link") or "")
+    if jix:
+        url = f"https://www.{jix.group(1)}/jobannonce/{jix.group(2)}"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=20)
         if resp.status_code != 200:
-            return ""
-        page = resp.text
+            return empty
+        page = _decode(resp)
     except Exception:
-        return ""
+        return empty
     if page.count("\ufffd") > 20:
-        return ""   # binært eller forkert afkodet svar
+        return empty   # binært eller forkert afkodet svar
+
+    body = re.search(r'<main\b.*?</main>', page, re.S | re.I)
+    page_text = _page_text(body.group(0) if body else page)
+    card = _contact_card(page)
+
+    def result(text: str) -> dict:
+        return {"text": text, "page": page_text, "card": card}
 
     for block in re.findall(r'<script[^>]+application/ld\+json[^>]*>(.*?)</script>', page, re.S):
         try:
@@ -519,48 +590,60 @@ def fetch_full_text(job: dict) -> str:
         items = data if isinstance(data, list) else data.get("@graph", [data])
         for item in items:
             if isinstance(item, dict) and item.get("@type") == "JobPosting" and item.get("description"):
-                return _page_text(item["description"])[:FULL_TEXT_LIMIT]
+                return result(_page_text(item["description"]))
 
     # SuccessFactors-karrieresider (Novo, Ambu, Tryg, Lundbeck, Nordea, Systematic m.fl.)
     start = page.find('itemprop="description"')
     if start != -1:
         text = _page_text(page[start:start + 60000].split(">", 1)[-1].split('id="reqdescription"')[0])
         if len(text) > 200:
-            return text[:FULL_TEXT_LIMIT]
+            return result(text)
 
     # Talentsoft (Nykredit, PensionDanmark)
     parts = re.findall(r'id="fldjobdescription_(?:description\d|primaryprofile)"[^>]*>(.*?)</div>', page, re.S)
     if parts:
         text = _page_text("\n".join(parts))
         if len(text) > 200:
-            return text[:FULL_TEXT_LIMIT]
+            return result(text)
 
     start = page.find('jobtext-jobad__body')
     if start != -1:
         end = page.find('jobtext-jobad__sidebar', start)
-        return _page_text(page[start:end if end != -1 else start + 40000].split(">", 1)[-1])[:FULL_TEXT_LIMIT]
+        return result(_page_text(page[start:end if end != -1 else start + 40000].split(">", 1)[-1]))
 
-    body = re.search(r'<main\b.*?</main>', page, re.S | re.I)
-    text = _page_text(body.group(0) if body else page)
-    if re.search(r'cookie', text[:600], re.I):
-        return ""   # sidetekst er cookie-/navigationsstøj; behold teaseren
-    return text[:FULL_TEXT_LIMIT]
+    if 'customlayout' in page and jix:   # Jobindex-annonce i arbejdsgiverens eget layout
+        return result(_page_text(re.sub(r'<head\b.*?</head>', ' ', page, flags=re.S | re.I)))
+    if re.search(r'cookie', page_text[:600], re.I):
+        return {"text": "", "page": "", "card": card}   # cookie-/navigationsstøj; behold teaseren
+    return result(page_text)
+
+
+def fetch_full_text(job: dict) -> str:
+    """Annoncens tekst, højst FULL_TEXT_LIMIT tegn ('' hvis siden ikke kan hentes)."""
+    return fetch_ad(job)["text"][:FULL_TEXT_LIMIT]
 
 
 def add_full_texts(jobs: list[dict], workers: int = 4) -> None:
-    """Erstatter den korte beskrivelse med annoncens fulde tekst, hvor den kan hentes."""
+    """Erstatter den korte beskrivelse med annoncens fulde tekst, hvor den kan hentes, og gemmer
+    kontaktafsnittet i job["contact"] ud fra hele teksten (før afkortning)."""
     from concurrent.futures import ThreadPoolExecutor
     if not jobs:
         return
     print(f"\nHenter fuld annoncetekst for {len(jobs)} opslag...")
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        texts = list(pool.map(fetch_full_text, jobs))
-    ok = 0
-    for job, text in zip(jobs, texts):
+        ads = list(pool.map(fetch_ad, jobs))
+    ok = n_contact = 0
+    for job, ad in zip(jobs, ads):
+        text = ad["text"]
         if len(text) > len(job.get("description") or "") + 100:
-            job["description"] = text
+            job["description"] = text[:FULL_TEXT_LIMIT]
             ok += 1
-    print(f"  Fuld tekst hentet for {ok}/{len(jobs)} (resten beholder teaseren)")
+        found = extract_contact(text or job.get("description") or "")
+        card = f"Kontaktperson (Jobindex): {ad['card']}" if ad.get("card") else ""
+        job["contact"] = " … ".join(p for p in (card, found) if p)
+        n_contact += bool(job["contact"])
+    print(f"  Fuld tekst hentet for {ok}/{len(jobs)} (resten beholder teaseren); "
+          f"kontaktafsnit fundet i {n_contact}")
 
 def scrape_jobindex(search_term: str) -> list[dict]:
     """Scraper Jobindex via Stash JSON variabel embedded i HTML.
@@ -1038,7 +1121,8 @@ if __name__ == "__main__":
         batch = [j for j in data["jobs"] if args.start <= j["id"] < args.start + args.count]
         for j in batch:
             desc = re.sub(r"\s+", " ", j.get("description") or "")[:args.chars]
-            print(f"[{j['id']}] {j['title']} | {j['company']} | {j['location']} | {j['source']}\n{desc}\n")
+            contact = f"\nKONTAKT: {j['contact']}" if j.get("contact") else ""
+            print(f"[{j['id']}] {j['title']} | {j['company']} | {j['location']} | {j['source']}\n{desc}{contact}\n")
         print(f"-- viste id {args.start}-{args.start + len(batch) - 1} af {len(data['jobs'])}")
     elif args.export:
         export_jobs(args.export, args.seen)
