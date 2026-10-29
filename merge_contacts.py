@@ -43,13 +43,10 @@ FORMULAS = {
     "Opslag": (f'=IFERROR(TEXTJOIN(CHAR(10),TRUE,UNIQUE(SORT(FILTER(Opslag!$F$2:$F,{_IN}),'
                f'FILTER(Opslag!$B$2:$B,{_IN}),FALSE))),"")'),
     "Seneste opslag": f'=IFERROR(INDEX(SORT(FILTER(Opslag!$G$2:$G,{_IN}),FILTER(Opslag!$B$2:$B,{_IN}),FALSE),1),"")',
-    "Antal opslag": f'=IFERROR(COUNTUNIQUE(FILTER(Opslag!$F$2:$F,{_IN})),0)',
+    "Antal opslag": f'=IFERROR(ROWS(UNIQUE(FILTER(Opslag!$F$2:$F,{_IN}))),0)',
     "Først set": f'=MINIFS(Opslag!$B$2:$B,Opslag!$A$2:$A,{_KEY})',
     "Sidst set": f'=MAXIFS(Opslag!$B$2:$B,Opslag!$A$2:$A,{_KEY})',
 }
-
-_SUFFIX = re.compile(r"\b(a s|aps|as|a/s|i s|p s|amba|ab|asa|plc|ltd|gmbh|danmark|denmark|group|koncern)\b")
-
 
 def _norm(text: str) -> str:
     text = unicodedata.normalize("NFKC", text or "").lower()
@@ -57,8 +54,13 @@ def _norm(text: str) -> str:
 
 
 def person_key(name: str, company: str) -> str:
-    company = re.sub(r"\s+", " ", _SUFFIX.sub(" ", _norm(company))).strip()
-    return f"{_norm(name)} | {company}"
+    """Samme nøgle som KEY_FORMULA: navn og virksomhed (uden selskabsform) med små bogstaver."""
+    clean = lambda t: re.sub(r"\s+", " ", unicodedata.normalize("NFKC", t or "")).strip().lower()
+    return f"{clean(name)} | {clean(_company(company))}"
+
+
+KEY_FORMULA = ('=LOWER(TRIM(INDIRECT("A"&ROW())))&" | "&LOWER(REGEXREPLACE(TRIM(INDIRECT("C"&ROW())),'
+               '"\\s+(A/S|ApS|A\\.S\\.|AS|P/S|I/S|K/S)$",""))')
 
 
 def _day(iso: str) -> str:
@@ -74,6 +76,11 @@ def _text(value) -> str:
     return s
 
 
+def _company(name: str) -> str:
+    """Virksomhedsnavn uden selskabsform, så 'Saxo Bank A/S' og 'Saxo Bank' bliver én nøgle."""
+    return re.sub(r"\s+(A/S|ApS|A\.S\.|AS|P/S|I/S|K/S)$", "", re.sub(r"\s+", " ", name or "").strip())
+
+
 def _valid(c: dict) -> bool:
     return bool((c.get("name") or "").strip() and (c.get("company") or "").strip())
 
@@ -84,6 +91,7 @@ def plan(history: dict) -> dict:
     pending = [c for r in history.get("runs", []) for c in r.get("contacts", [])
                if not c.get("synced") and _valid(c)]
     for c in sorted(pending, key=lambda c: c.get("date", "")):
+        c = dict(c, company=_company(c["company"]))
         key = person_key(c["name"], c["company"])
         date = (c.get("date") or "")[:10]
         job = re.sub(r"\s+", " ", c.get("job_title") or "").strip()
@@ -105,7 +113,9 @@ def plan(history: dict) -> dict:
                       "LinkedIn-søgning": "https://www.linkedin.com/search/results/people/?keywords="
                                           + quote_plus(f"{c['name']} {c['company']}"),
                       "Status": "", "Noter": "", "Nøgle": key}
-            kontakter_rows.append([FORMULAS.get(col, static.get(col, "")) for col in KONTAKTER])
+            row = [FORMULAS.get(col, static.get(col, "")) for col in KONTAKTER]
+            row[KONTAKTER.index("Nøgle")] = KEY_FORMULA
+            kontakter_rows.append(row)
     return {"opslag_rows": opslag_rows, "kontakter_rows": kontakter_rows}
 
 
@@ -116,7 +126,7 @@ def mark(history: dict) -> int:
         for c in r.get("contacts", []):
             if not c.get("synced") and _valid(c):
                 c["synced"] = True
-                keys.add(person_key(c["name"], c["company"]))
+                keys.add(person_key(c["name"], _company(c["company"])))
                 n += 1
     history["contact_keys"] = sorted(keys)
     return n
@@ -135,6 +145,8 @@ def setup(kontakter_sheet_id: int = 0, opslag_sheet_id: int = 1) -> dict:
                   "backgroundColorStyle": {"rgbColor": _rgb("#323b4c")}, "verticalAlignment": "MIDDLE"}
     date_fmt = {"numberFormat": {"type": "DATE", "pattern": "yyyy-mm-dd"}}
     req = [
+        # Formlerne skrives med engelsk syntaks (komma, TRUE); dansk landeindstilling kræver semikolon.
+        {"updateSpreadsheetProperties": {"properties": {"locale": "en_GB"}, "fields": "locale"}},
         {"updateSheetProperties": {"properties": {"sheetId": k, "title": "Kontakter",
                                                   "gridProperties": {"frozenRowCount": 1, "frozenColumnCount": 1}},
                                    "fields": "title,gridProperties.frozenRowCount,gridProperties.frozenColumnCount"}},

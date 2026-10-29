@@ -74,7 +74,8 @@ Resultatside: https://claude.ai/artifact/CqRmLzWfJJTaSDkE3brsbi
 6. Opdatér kontaktarket (Google Sheet "Kontaktpersoner fra jobopslag",
    id `1K9E-a0IZpDEv5fE4SX75pGPYBm0APTbCAnDBhMv31_k`). Kræver Google Sheets-forbindelsen.
    Arket har fanen `Kontakter` (én række pr. person; fokus, opslag, antal og datoer er
-   formler) og fanen `Opslag` (én linje pr. person pr. opslag). Der tilføjes kun rækker;
+   formler) og fanen `Opslag` (én linje pr. person pr. opslag). Arket står på britisk engelsk
+   landeindstilling, så formlerne skrives med komma. Der tilføjes kun rækker;
    eksisterende rækker læses og ændres aldrig.
    - `python merge_contacts.py plan --jobs site/jobs.json --out sync.json`
      (tager alle kontakter i historikken, der ikke er skrevet endnu, så en dag hvor arket ikke
