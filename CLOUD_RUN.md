@@ -48,9 +48,21 @@ Resultatside: https://claude.ai/artifact/CqRmLzWfJJTaSDkE3brsbi
 
 6. Publicér til den eksisterende side (samme URL, ingen ny side):
    Artifact `action: "publish"`, `url: <resultatside>`, `file_path: site/index.html`,
-   `files: {"jobs.json": "site/jobs.json"}`. Udelad `icon`.
+   `files: {"jobs.json": "site/jobs.json"}`. Udelad `icon` og `capabilities`
+   (siden har database-capability; udeladt bevares den, og Mads' gemte opslag med den).
 
-7. Afslut med én linje: antal nye opslag og fordelingen grøn/gul/rød, samt eventuelle
-   kilder der gav 0 opslag.
+7. Tjek Mads' gemte opslag. Siden gemmer markeringer i sin database (samlingen `marks`).
+   - Hent dem: ArtifactData `action: "list"`, `url: <resultatside>`, `collection: "marks"`,
+     `out_dir: marks`. Er samlingen tom, så spring resten af trinnet over.
+   - Gem list-svarets tekst (linjerne med `"<doc_id>" … version N`) ordret i
+     `marks/versions.txt` med Write; versionerne står kun i svaret, ikke i filerne.
+   - Kør `python check_saved.py marks --versions marks/versions.txt --out mark_updates.json`.
+     Scriptet besøger hvert gemt opslag og afgør, om det stadig er slået op.
+   - Er `mark_updates.json` ikke tom, så send dens liste som `writes` i ArtifactData
+     `action: "batch"` (højst 50 pr. kald). Afvises batchen pga. version (Mads har ændret en
+     markering imens), så hent listen igen og kør scriptet én gang til. Ændr kun `check`.
+
+8. Afslut med én linje: antal nye opslag og fordelingen grøn/gul/rød, eventuelle
+   kilder der gav 0 opslag, og antal gemte opslag tjekket (heraf taget ned).
 
 Ændr ikke koden i repoet under en planlagt kørsel.

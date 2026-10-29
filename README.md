@@ -15,7 +15,7 @@ Bygget for at slippe for at scrolle jobsider hver dag. Det er min egen kandidat-
 To måder at køre det på:
 
 - **Lokalt (Mac):** `python job_alert.py` sender en HTML-mail grupperet efter farve. Køres ugentligt via `launchd`.
-- **I skyen:** en planlagt Claude-session følger [CLOUD_RUN.md](CLOUD_RUN.md), laver selv farvevurderingen og opdaterer en privat resultatside. Kræver hverken computer, SMTP eller API-nøgle.
+- **I skyen:** en planlagt Claude-session følger [CLOUD_RUN.md](CLOUD_RUN.md), laver selv farvevurderingen og opdaterer en privat resultatside. Kræver hverken computer, SMTP eller API-nøgle. På resultatsiden kan opslag gemmes; de bliver stående øverst, til de er markeret som søgt eller er taget ned (`check_saved.py` tjekker dem hver morgen).
 
 ## Hvorfor
 

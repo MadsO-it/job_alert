@@ -23,7 +23,7 @@ from pathlib import Path
 from job_alert import job_key
 
 MAX_RUNS_ON_PAGE = 12
-JOB_FIELDS = ("title", "company", "location", "source", "link", "date", "rating")
+JOB_FIELDS = ("title", "company", "location", "source", "link", "date", "deadline", "rating")
 
 
 def _clean(text) -> str:
@@ -143,6 +143,27 @@ details a { color: var(--muted); }
 footer { color: var(--muted); font-size: 12px; }
 #src.warn summary { color: var(--red); font-weight: 700; }
 #src li.bad { color: var(--red); }
+/* Gemte opslag: ligger over kørselsvælgeren, fordi de går på tværs af kørsler. */
+#saved { display: grid; gap: 8px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+#saved h2 { font-family: var(--font-display); font-size: 15px; font-weight: 600; margin: 0; display: flex; gap: 8px; align-items: baseline; }
+#saved h2 .n { color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+#saved details { border-top: 0; padding-top: 2px; }
+#saved details > div { display: grid; gap: 8px; margin-top: 8px; }
+.saved-empty { color: var(--muted); font-size: 14px; margin: 0; }
+.acts { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; }
+.act { font-family: var(--font-display); font-weight: 600; font-size: 12.5px; min-height: 34px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; }
+.act:hover { border-color: var(--muted); }
+.act:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.act[aria-pressed="true"] { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); }
+.act.quiet { background: transparent; color: var(--muted); }
+.act:disabled { opacity: .55; cursor: default; }
+.state { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.state.warn { color: var(--yellow); }
+.state.bad { color: var(--red); }
+.state.ok { color: var(--green); }
+.job.gone { opacity: .75; }
+.job.gone a { text-decoration: line-through; text-decoration-thickness: 1px; }
+.note { color: var(--muted); font-size: 13px; margin: 0; }
 </style>
 
 <header><div class="wrap">
@@ -152,6 +173,13 @@ footer { color: var(--muted); font-size: 12px; }
 </div></header>
 
 <main><div class="wrap">
+  <section id="saved" aria-labelledby="saved-h">
+    <h2 id="saved-h">Gemte opslag <span class="n" id="saved-n"></span></h2>
+    <div id="saved-list" class="group"><p class="saved-empty">Indlæser gemte opslag …</p></div>
+    <details id="saved-gone" hidden><summary id="saved-gone-sum"></summary><div id="saved-gone-list"></div></details>
+    <details id="applied" hidden><summary id="applied-sum"></summary><div id="applied-list"></div></details>
+    <p class="note" id="saved-msg" role="status" hidden></p>
+  </section>
   <div class="controls">
     <div class="row">
       <label class="lbl" for="run">Kørsel</label>
@@ -162,7 +190,7 @@ footer { color: var(--muted); font-size: 12px; }
   <div id="list"></div>
   <details id="excl"><summary id="excl-sum"></summary><ul id="excl-list"></ul></details>
   <details id="src"><summary id="src-sum"></summary><ul id="src-list"></ul></details>
-  <footer>Farverne er Claudes forslag ud fra din profil. Grøn: klart match. Gul: delvist eller uklart. Rød: dårligt match.</footer>
+  <footer>Farverne er Claudes forslag ud fra din profil. Grøn: klart match. Gul: delvist eller uklart. Rød: dårligt match. Gemte opslag tjekkes hver morgen og flyttes ned under "Ikke længere slået op", når annoncen er taget ned, eller fristen er udløbet.</footer>
 </div></main>
 
 <script type="application/json" id="data">__DATA__</script>
@@ -205,12 +233,7 @@ function render() {
     any = true;
     const g = el("section", { class: "group" });
     const h = el("h2"); h.append(LABEL[k], el("span", { class: "n" }, String(jobs.length))); g.append(h);
-    jobs.forEach(j => {
-      const card = el("article", { class: "job", "data-r": k });
-      card.append(el("a", { href: j.link, target: "_blank", rel: "noopener" }, j.title));
-      card.append(el("div", { class: "meta" }, [j.company, j.location, j.source, fmtDate(j.date)].filter(Boolean).join(" · ")));
-      g.append(card);
-    });
+    jobs.forEach(j => g.append(jobCard(j, k, run)));
     list.append(g);
   });
   if (!any) list.append(el("p", { class: "empty" }, run.jobs.length ? "Alle farver er slået fra. Tryk på en farve ovenfor." : "Ingen nye opslag i denne kørsel."));
@@ -254,8 +277,145 @@ function renderSources(run) {
     `${c.name} · ${c.error ? "fejl: " + c.error : c.count + " opslag"}`)));
 }
 
+/* ── Gemte opslag ──────────────────────────────────────────────────────────
+   Markeringer ligger i sidens database (samlingen "marks"), så de overlever de
+   daglige genudgivelser. Den daglige kørsel skriver feltet "check" på hver gemt
+   markering: state "live", "removed" eller "unknown". */
+let db = null, dbState = "loading";            // loading | ready | off
+const marks = new Map();
+const pending = new Set();
+let message = "";
+
+const normLink = l => (l || "").split("?")[0].replace(/\/+$/, "");
+function markId(link) {                         // cyrb53 af det normaliserede link
+  const s = normLink(link); let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 2654435761); h2 = Math.imul(h2 ^ c, 1597334677); }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return "j" + (h2 >>> 0).toString(16).padStart(8, "0") + (h1 >>> 0).toString(16).padStart(8, "0");
+}
+const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+const fmtDay = iso => { const d = new Date(iso); return isNaN(d) ? "" : `${d.getDate()}/${d.getMonth() + 1}`; };
+const isDate = s => /^\d{4}-\d{2}-\d{2}$/.test(s || "");
+const daysUntil = s => Math.round((new Date(s + "T12:00") - new Date(todayISO() + "T12:00")) / 864e5);
+const deadlinePassed = m => isDate(m.deadline) && daysUntil(m.deadline) < 0;
+
+function jobCard(j, k, run) {
+  const card = el("article", { class: "job", "data-r": k });
+  card.append(el("a", { href: j.link, target: "_blank", rel: "noopener" }, j.title));
+  card.append(el("div", { class: "meta" }, [j.company, j.location, j.source, fmtDate(j.date)].filter(Boolean).join(" · ")));
+  if (dbState !== "ready") return card;
+  const id = markId(j.link), m = marks.get(id), acts = el("div", { class: "acts" });
+  if (m && m.status === "applied") {
+    acts.append(el("span", { class: "state ok" }, `Søgt ${fmtDay(m.applied_at)}`));
+  } else {
+    const b = el("button", { class: "act", type: "button", "aria-pressed": String(!!m) }, m ? "Gemt" : "Gem");
+    b.disabled = pending.has(id);
+    b.onclick = () => m ? write(id, ref => ref.delete()) : saveJob(j, run);
+    acts.append(b);
+  }
+  card.append(acts);
+  return card;
+}
+
+function saveJob(j, run) {
+  write(markId(j.link), ref => ref.set({
+    status: "saved", link: j.link, title: j.title, company: j.company || "", location: j.location || "",
+    source: j.source || "", rating: j.rating || "unrated", deadline: j.deadline || "",
+    first_seen: run.run_at, saved_at: new Date().toISOString(),
+  }));
+}
+
+async function write(id, fn) {
+  if (!db || pending.has(id)) return;
+  pending.add(id); message = ""; renderAll();
+  try { await fn(db.collection("marks").doc(id)); }
+  catch (e) {
+    message = e && e.code === "quota_exceeded" ? "Der er ikke plads til flere markeringer. Fjern nogle gamle." :
+      e && e.code === "invalid_argument" ? "Du har ikke adgang til at ændre markeringer på denne side." :
+      "Ændringen blev ikke gemt. Prøv igen.";
+  }
+  finally { pending.delete(id); renderAll(); }
+}
+
+function savedCard(id, m, kind) {
+  const r = ["green", "yellow", "red"].includes(m.rating) ? m.rating : "unrated";
+  const card = el("article", { class: "job" + (kind === "gone" ? " gone" : ""), "data-r": r });
+  card.append(el("a", { href: m.link, target: "_blank", rel: "noopener" }, m.title || m.link));
+  card.append(el("div", { class: "meta" }, [m.company, m.location, m.source].filter(Boolean).join(" · ")));
+  const acts = el("div", { class: "acts" });
+  const state = (cls, text) => acts.append(el("span", { class: "state " + cls }, text));
+  const btn = (label, fn, quiet) => { const b = el("button", { class: "act" + (quiet ? " quiet" : ""), type: "button" }, label);
+    b.disabled = pending.has(id); b.onclick = () => write(id, fn); acts.append(b); };
+  const c = m.check || {};
+  if (kind === "applied") {
+    state("ok", `Søgt ${fmtDay(m.applied_at)}`);
+    btn("Fortryd", ref => ref.update({ status: "saved", applied_at: "" }), true);
+  } else {
+    if (kind === "gone") {
+      state("bad", c.state === "removed" ? `Taget ned · opdaget ${fmtDay(c.removed_at || c.at)}` : `Fristen udløb ${fmtDate(m.deadline)}`);
+    } else {
+      if (m.deadline === "snarest") state("warn", "Frist: snarest");
+      else if (isDate(m.deadline)) { const n = daysUntil(m.deadline);
+        state(n <= 3 ? "warn" : "", n === 0 ? "Frist i dag" : `Frist ${fmtDate(m.deadline)} · ${n} ${n === 1 ? "dag" : "dage"}`); }
+      if (c.state === "live") state("", `Stadig slået op · tjekket ${fmtDay(c.at)}`);
+      else if (c.state === "unknown") state("warn", `Kunne ikke tjekkes ${fmtDay(c.at)}`);
+      else state("", `Gemt ${fmtDay(m.saved_at)} · tjekkes ved næste kørsel`);
+    }
+    btn("Markér som søgt", ref => ref.update({ status: "applied", applied_at: new Date().toISOString() }));
+    btn("Fjern", ref => ref.delete(), true);
+  }
+  card.append(acts);
+  return card;
+}
+
+function renderSaved() {
+  const list = document.getElementById("saved-list"), n = document.getElementById("saved-n");
+  const msg = document.getElementById("saved-msg");
+  msg.hidden = !message; msg.textContent = message;
+  if (dbState !== "ready") {
+    n.textContent = "";
+    list.replaceChildren(el("p", { class: "saved-empty" }, dbState === "loading" ? "Indlæser gemte opslag …" :
+      "Gemte opslag kan kun vises, når siden er åbnet på claude.ai, og du er logget ind."));
+    document.getElementById("saved-gone").hidden = document.getElementById("applied").hidden = true;
+    return;
+  }
+  const active = [], gone = [], applied = [];
+  marks.forEach((m, id) => {
+    if (m.status === "applied") applied.push([id, m]);
+    else if ((m.check || {}).state === "removed" || deadlinePassed(m)) gone.push([id, m]);
+    else active.push([id, m]);
+  });
+  const dl = m => m.deadline === "snarest" ? "0000" : isDate(m.deadline) ? m.deadline : "9999";
+  active.sort((a, b) => dl(a[1]).localeCompare(dl(b[1])) || String(a[1].saved_at).localeCompare(String(b[1].saved_at)));
+  applied.sort((a, b) => String(b[1].applied_at).localeCompare(String(a[1].applied_at)));
+  n.textContent = String(active.length);
+  list.replaceChildren(...(active.length ? active.map(([id, m]) => savedCard(id, m, "active")) :
+    [el("p", { class: "saved-empty" }, "Ingen gemte opslag. Tryk Gem på et opslag nedenfor, så bliver det stående her, indtil du har søgt det, eller det bliver taget ned.")]));
+  const fill = (box, sum, listId, items, kind, label) => {
+    document.getElementById(box).hidden = !items.length;
+    document.getElementById(sum).textContent = `${label} (${items.length})`;
+    document.getElementById(listId).replaceChildren(...items.map(([id, m]) => savedCard(id, m, kind)));
+  };
+  fill("saved-gone", "saved-gone-sum", "saved-gone-list", gone, "gone", "Ikke længere slået op");
+  fill("applied", "applied-sum", "applied-list", applied, "applied", "Søgt");
+}
+
+function renderAll() { render(); renderSaved(); }
+
 runSel.onchange = render;
-render();
+renderAll();
+
+(async () => {
+  try { db = window.claude && window.claude.use ? await window.claude.use("db") : null; } catch (e) { db = null; }
+  if (!db) { dbState = "off"; renderAll(); return; }
+  db.collection("marks").onSnapshot(snap => {
+    marks.clear();
+    snap.docs.forEach(d => { if (d.exists) marks.set(d.id, d.data()); });
+    dbState = "ready"; renderAll();
+  }, () => { dbState = "off"; renderAll(); });
+})();
 </script>
 """
 
@@ -267,11 +427,24 @@ def render_html(history: dict) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--new", required=True)
-    ap.add_argument("--ratings", required=True)
+    ap.add_argument("--new")
+    ap.add_argument("--ratings")
     ap.add_argument("--history")
+    ap.add_argument("--rerender", metavar="JOBS_JSON",
+                    help="Byg kun siden igen ud fra en eksisterende jobs.json (ingen ny kørsel)")
     ap.add_argument("--out-dir", required=True)
     args = ap.parse_args()
+
+    if args.rerender:
+        result = json.loads(Path(args.rerender).read_text(encoding="utf-8"))
+        out = Path(args.out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "jobs.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+        (out / "index.html").write_text(render_html(result), encoding="utf-8")
+        print(f"Side genopbygget ud fra {args.rerender}. Ud: {out}")
+        return
+    if not (args.new and args.ratings):
+        ap.error("--new og --ratings er påkrævet (eller brug --rerender)")
 
     new = json.loads(Path(args.new).read_text(encoding="utf-8"))
     ratings = json.loads(Path(args.ratings).read_text(encoding="utf-8"))
