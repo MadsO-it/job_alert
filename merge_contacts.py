@@ -1,38 +1,52 @@
 """
-Fletter dagens kontaktpersoner ind i kontaktarket (Google Sheet i Mads' Drive).
+Kontaktarket (Google Sheet i Mads' Drive): kontaktpersoner fra jobopslagene.
+
+Arket har to faner:
+  Kontakter  én række pr. person. Faste felter skrives én gang, når personen dukker op første
+             gang. Fokus, opslag, antal og datoer er formler, der henter fra fanen Opslag via
+             nøglen i kolonne R, så rækken aldrig skal omskrives og kan sorteres frit.
+             Status og Noter er Mads' egne kolonner.
+  Opslag     én linje pr. person pr. opslag. Får kun nye linjer.
+
+Den daglige kørsel tilføjer derfor kun rækker (append), uanset hvor stort arket bliver.
+Hvilke kontakter der allerede er skrevet, står i jobs.json: hver kontakt i en kørsel får
+"synced": true, og personnøglerne i arket står i "contact_keys".
 
 Brug:
-  python merge_contacts.py --new contacts.json [--existing values.json] \
-      [--tab Kontakter] --out sheet_values.json [--csv kontakter.csv]
-
-  contacts.json   (eller jobs.json, hvor kørslernes "contacts" samles)
-                  liste skrevet af den daglige kørsel, ét objekt pr. kontaktperson pr. opslag:
-                  {"name", "title", "company", "department", "role", "focus", "why",
-                   "job_title", "job_link", "email", "phone", "date"}
-                  role er en af ROLES. date er opslagets kørselsdato (YYYY-MM-DD).
-  values.json     svaret fra Sheets get_values på '<tab>'!A:Q (eller kun dets "values"-liste).
-                  Udelades første gang.
-  sheet_values.json  {"range": "'<tab>'!A1", "values": [...]} klar til Sheets update_values.
-  --csv           skriver også arket som CSV (til første oprettelse via Drive).
-
-Samme person (navn + virksomhed) samles i én række. Rækkefølgen i arket bevares, nye
-personer kommer nederst, og kolonnerne Status og Noter røres aldrig.
+  python merge_contacts.py plan --jobs site/jobs.json --out sync.json
+      skriver {"opslag_rows": [...], "kontakter_rows": [...]} med de rækker, der skal tilføjes
+  python merge_contacts.py mark --jobs site/jobs.json
+      efter vellykket skrivning: markerer kontakterne som synced, gemmer nøglerne og bygger
+      index.html igen ved siden af jobs.json
+  python merge_contacts.py setup --out setup.json
+      overskrifter og formatering til et tomt ark (første gang)
 """
 
 import argparse
-import csv
 import json
 import re
 import unicodedata
 from pathlib import Path
 from urllib.parse import quote_plus
 
-HEADER = ["Navn", "Titel", "Virksomhed", "Afdeling", "Rolle", "Hvad de arbejder på",
-          "Hvorfor relevant", "Opslag", "Seneste opslag", "Antal opslag", "Først set",
-          "Sidst set", "E-mail", "Telefon", "LinkedIn-søgning", "Status", "Noter"]
-COL = {h: i for i, h in enumerate(HEADER)}
+KONTAKTER = ["Navn", "Titel", "Virksomhed", "Afdeling", "Rolle", "Hvad de arbejder på",
+             "Hvorfor relevant", "Opslag", "Seneste opslag", "Antal opslag", "Først set",
+             "Sidst set", "E-mail", "Telefon", "LinkedIn-søgning", "Status", "Noter", "Nøgle"]
+OPSLAG = ["Nøgle", "Dato", "Navn", "Virksomhed", "Fokus", "Opslag", "Link", "Rolle"]
 ROLES = ("Leder", "HR og rekruttering", "Rekrutteringsbureau", "Andet")
-MAX_FOCUS_ENTRIES = 3
+
+_KEY = 'INDIRECT("R"&ROW())'
+_IN = f'Opslag!$A$2:$A={_KEY}'
+FORMULAS = {
+    "Hvad de arbejder på": (f'=IFERROR(TEXTJOIN(CHAR(10),TRUE,UNIQUE(SORT(FILTER(Opslag!$E$2:$E,{_IN},'
+                            f'Opslag!$E$2:$E<>""),FILTER(Opslag!$B$2:$B,{_IN},Opslag!$E$2:$E<>""),FALSE))),"")'),
+    "Opslag": (f'=IFERROR(TEXTJOIN(CHAR(10),TRUE,UNIQUE(SORT(FILTER(Opslag!$F$2:$F,{_IN}),'
+               f'FILTER(Opslag!$B$2:$B,{_IN}),FALSE))),"")'),
+    "Seneste opslag": f'=IFERROR(INDEX(SORT(FILTER(Opslag!$G$2:$G,{_IN}),FILTER(Opslag!$B$2:$B,{_IN}),FALSE),1),"")',
+    "Antal opslag": f'=IFERROR(COUNTUNIQUE(FILTER(Opslag!$F$2:$F,{_IN})),0)',
+    "Først set": f'=MINIFS(Opslag!$B$2:$B,Opslag!$A$2:$A,{_KEY})',
+    "Sidst set": f'=MAXIFS(Opslag!$B$2:$B,Opslag!$A$2:$A,{_KEY})',
+}
 
 _SUFFIX = re.compile(r"\b(a s|aps|as|a/s|i s|p s|amba|ab|asa|plc|ltd|gmbh|danmark|denmark|group|koncern)\b")
 
@@ -42,8 +56,9 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^0-9a-zæøåäöüé ]+", " ", text)).strip()
 
 
-def person_key(name: str, company: str) -> tuple[str, str]:
-    return _norm(name), re.sub(r"\s+", " ", _SUFFIX.sub(" ", _norm(company))).strip()
+def person_key(name: str, company: str) -> str:
+    company = re.sub(r"\s+", " ", _SUFFIX.sub(" ", _norm(company))).strip()
+    return f"{_norm(name)} | {company}"
 
 
 def _day(iso: str) -> str:
@@ -51,127 +66,134 @@ def _day(iso: str) -> str:
     return f"{int(m[3])}/{int(m[2])}" if m else ""
 
 
-def _iso(value: str) -> str:
-    """Dato som YYYY-MM-DD, uanset om arket viser 2026-10-29, 29.10.2026, 29-10-2026 eller 29/10/2026."""
-    s = str(value or "").strip().lstrip("'")
-    m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", s)
-    if m:
-        return f"{m[1]}-{int(m[2]):02d}-{int(m[3]):02d}"
-    m = re.match(r"(\d{1,2})[./-](\d{1,2})[./-](\d{4})", s)
-    if m:
-        return f"{m[3]}-{int(m[2]):02d}-{int(m[1]):02d}"
-    return s
-
-
 def _text(value) -> str:
     """Tekst der ellers ville blive tolket som tal, dato eller formel får en apostrof foran."""
-    s = str(value or "").strip()
+    s = re.sub(r"\s+", " ", str(value or "")).strip()
     if s and (re.fullmatch(r"[+\d][\d\s\-./()]*", s) or s[0] in "=+-@"):
         return "'" + s
     return s
 
 
-def linkedin_search(name: str, company: str) -> str:
-    return "https://www.linkedin.com/search/results/people/?keywords=" + quote_plus(f"{name} {company}")
+def _valid(c: dict) -> bool:
+    return bool((c.get("name") or "").strip() and (c.get("company") or "").strip())
 
 
-def load_existing(path: str | None) -> list[list[str]]:
-    if not path or not Path(path).exists():
-        return []
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
-    values = data.get("values", []) if isinstance(data, dict) else data
-    rows = [list(r) + [""] * (len(HEADER) - len(r)) for r in values]
-    if rows and rows[0][:2] == HEADER[:2]:
-        rows = rows[1:]
-    rows = [[str(c) for c in r[:len(HEADER)]] for r in rows if any(str(c).strip() for c in r)]
-    for r in rows:
-        r[COL["Først set"]], r[COL["Sidst set"]] = _iso(r[COL["Først set"]]), _iso(r[COL["Sidst set"]])
-    return rows
-
-
-def merge(rows: list[list[str]], contacts: list[dict]) -> tuple[list[list[str]], int, int]:
-    index = {person_key(r[COL["Navn"]], r[COL["Virksomhed"]]): r for r in rows}
-    added = updated = 0
-    for c in sorted(contacts, key=lambda c: c.get("date", "")):
-        name, company = (c.get("name") or "").strip(), (c.get("company") or "").strip()
-        if not name or not company:
-            continue
+def plan(history: dict) -> dict:
+    keys = set(history.get("contact_keys", []))
+    opslag_rows, kontakter_rows, seen_log = [], [], set()
+    pending = [c for r in history.get("runs", []) for c in r.get("contacts", [])
+               if not c.get("synced") and _valid(c)]
+    for c in sorted(pending, key=lambda c: c.get("date", "")):
+        key = person_key(c["name"], c["company"])
         date = (c.get("date") or "")[:10]
-        job = (c.get("job_title") or "").strip()
-        job_entry = f"{job} ({_day(date)})" if job and date else job
-        key = person_key(name, company)
-        row = index.get(key)
-        if row is None:
-            row = [""] * len(HEADER)
-            row[COL["Navn"]], row[COL["Virksomhed"]] = name, company
-            row[COL["Først set"]] = date
-            row[COL["LinkedIn-søgning"]] = linkedin_search(name, company)
-            rows.append(row)
-            index[key] = row
-            added += 1
-        else:
-            updated += 1
-        for field, col in (("title", "Titel"), ("department", "Afdeling"), ("why", "Hvorfor relevant"),
-                           ("email", "E-mail"), ("phone", "Telefon")):
-            if (c.get(field) or "").strip():
-                row[COL[col]] = c[field].strip()
-        role = (c.get("role") or "").strip()
-        if role in ROLES and not (row[COL["Rolle"]] == "Leder" and role == "Andet"):
-            row[COL["Rolle"]] = role
-        focus = (c.get("focus") or "").strip()
-        if focus and _norm(focus) not in _norm(row[COL["Hvad de arbejder på"]]):
-            entries = [e for e in row[COL["Hvad de arbejder på"]].split("\n") if e.strip()]
-            entries.insert(0, f"{_day(date)}: {focus}" if date else focus)
-            row[COL["Hvad de arbejder på"]] = "\n".join(entries[:MAX_FOCUS_ENTRIES])
-        jobs = [j for j in row[COL["Opslag"]].split("\n") if j.strip()]
-        titles = {_norm(re.sub(r"\s*\(\d+/\d+\)$", "", j)) for j in jobs}
-        if job and _norm(job) not in titles:
-            jobs.insert(0, job_entry)
-        row[COL["Opslag"]] = "\n".join(jobs)
-        row[COL["Antal opslag"]] = str(len(jobs))
-        if c.get("job_link") and date >= row[COL["Sidst set"]]:
-            row[COL["Seneste opslag"]] = c["job_link"]
-        if date and date > row[COL["Sidst set"]]:
-            row[COL["Sidst set"]] = date
-        if date and (not row[COL["Først set"]] or date < row[COL["Først set"]]):
-            row[COL["Først set"]] = date
-    return rows, added, updated
+        job = re.sub(r"\s+", " ", c.get("job_title") or "").strip()
+        log_id = (key, _norm(job))
+        if log_id not in seen_log:
+            seen_log.add(log_id)
+            focus = re.sub(r"\s+", " ", c.get("focus") or "").strip()
+            opslag_rows.append([key, date, _text(c["name"]), _text(c["company"]),
+                                f"{_day(date)}: {focus}" if focus and date else _text(focus),
+                                f"{job} ({_day(date)})" if job and date else _text(job),
+                                c.get("job_link") or "", c.get("role") or ""])
+        if key not in keys:
+            keys.add(key)
+            static = {"Navn": _text(c["name"]), "Titel": _text(c.get("title")),
+                      "Virksomhed": _text(c["company"]), "Afdeling": _text(c.get("department")),
+                      "Rolle": c.get("role") if c.get("role") in ROLES else "Andet",
+                      "Hvorfor relevant": _text(c.get("why")), "E-mail": _text(c.get("email")),
+                      "Telefon": _text(c.get("phone")),
+                      "LinkedIn-søgning": "https://www.linkedin.com/search/results/people/?keywords="
+                                          + quote_plus(f"{c['name']} {c['company']}"),
+                      "Status": "", "Noter": "", "Nøgle": key}
+            kontakter_rows.append([FORMULAS.get(col, static.get(col, "")) for col in KONTAKTER])
+    return {"opslag_rows": opslag_rows, "kontakter_rows": kontakter_rows}
+
+
+def mark(history: dict) -> int:
+    keys = set(history.get("contact_keys", []))
+    n = 0
+    for r in history.get("runs", []):
+        for c in r.get("contacts", []):
+            if not c.get("synced") and _valid(c):
+                c["synced"] = True
+                keys.add(person_key(c["name"], c["company"]))
+                n += 1
+    history["contact_keys"] = sorted(keys)
+    return n
+
+
+def _rgb(hex_color: str) -> dict:
+    h = hex_color.lstrip("#")
+    return {"red": int(h[0:2], 16) / 255, "green": int(h[2:4], 16) / 255, "blue": int(h[4:6], 16) / 255}
+
+
+def setup(kontakter_sheet_id: int = 0, opslag_sheet_id: int = 1) -> dict:
+    """update_spreadsheet-requests og overskrifter til et tomt ark."""
+    k, o = kontakter_sheet_id, opslag_sheet_id
+    widths = [170, 170, 160, 160, 130, 340, 300, 260, 120, 80, 95, 95, 170, 110, 120, 120, 220, 60]
+    header_fmt = {"textFormat": {"bold": True, "foregroundColorStyle": {"rgbColor": _rgb("#ffffff")}},
+                  "backgroundColorStyle": {"rgbColor": _rgb("#323b4c")}, "verticalAlignment": "MIDDLE"}
+    date_fmt = {"numberFormat": {"type": "DATE", "pattern": "yyyy-mm-dd"}}
+    req = [
+        {"updateSheetProperties": {"properties": {"sheetId": k, "title": "Kontakter",
+                                                  "gridProperties": {"frozenRowCount": 1, "frozenColumnCount": 1}},
+                                   "fields": "title,gridProperties.frozenRowCount,gridProperties.frozenColumnCount"}},
+        {"addSheet": {"properties": {"sheetId": o, "title": "Opslag", "gridProperties": {"frozenRowCount": 1}}}},
+        {"repeatCell": {"range": {"sheetId": k, "startRowIndex": 0, "endRowIndex": 1},
+                        "cell": {"userEnteredFormat": header_fmt},
+                        "fields": "userEnteredFormat.textFormat,userEnteredFormat.backgroundColorStyle,"
+                                  "userEnteredFormat.verticalAlignment"}},
+        {"repeatCell": {"range": {"sheetId": o, "startRowIndex": 0, "endRowIndex": 1},
+                        "cell": {"userEnteredFormat": header_fmt},
+                        "fields": "userEnteredFormat.textFormat,userEnteredFormat.backgroundColorStyle,"
+                                  "userEnteredFormat.verticalAlignment"}},
+        {"repeatCell": {"range": {"sheetId": k, "startRowIndex": 1},
+                        "cell": {"userEnteredFormat": {"verticalAlignment": "TOP", "wrapStrategy": "CLIP"}},
+                        "fields": "userEnteredFormat.verticalAlignment,userEnteredFormat.wrapStrategy"}},
+        {"repeatCell": {"range": {"sheetId": k, "startRowIndex": 1, "startColumnIndex": 10, "endColumnIndex": 12},
+                        "cell": {"userEnteredFormat": date_fmt}, "fields": "userEnteredFormat.numberFormat"}},
+        {"repeatCell": {"range": {"sheetId": o, "startRowIndex": 1, "startColumnIndex": 1, "endColumnIndex": 2},
+                        "cell": {"userEnteredFormat": date_fmt}, "fields": "userEnteredFormat.numberFormat"}},
+        {"updateDimensionProperties": {"range": {"sheetId": k, "dimension": "COLUMNS", "startIndex": 17, "endIndex": 18},
+                                       "properties": {"hiddenByUser": True}, "fields": "hiddenByUser"}},
+        {"setDataValidation": {"range": {"sheetId": k, "startRowIndex": 1, "startColumnIndex": 15, "endColumnIndex": 16},
+                               "rule": {"condition": {"type": "ONE_OF_LIST", "values": [
+                                   {"userEnteredValue": v} for v in ("Følger på LinkedIn", "Kontaktet", "Har svaret",
+                                                                     "Møde aftalt", "Ikke relevant")]},
+                                        "showCustomUi": True, "strict": False}}},
+    ]
+    for col, px in enumerate(widths):
+        req.append({"updateDimensionProperties": {"range": {"sheetId": k, "dimension": "COLUMNS",
+                                                            "startIndex": col, "endIndex": col + 1},
+                                                  "properties": {"pixelSize": px}, "fields": "pixelSize"}})
+    return {"requests": req, "headers": {"'Kontakter'!A1": [KONTAKTER], "'Opslag'!A1": [OPSLAG]}}
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--new", required=True)
-    ap.add_argument("--existing")
-    ap.add_argument("--tab", default="Kontakter")
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--csv")
+    ap.add_argument("action", choices=["plan", "mark", "setup"])
+    ap.add_argument("--jobs", help="site/jobs.json fra dagens kørsel")
+    ap.add_argument("--out", help="plan/setup: hvor resultatet gemmes")
     args = ap.parse_args()
 
-    data = json.loads(Path(args.new).read_text(encoding="utf-8"))
-    if isinstance(data, dict):   # jobs.json: alle kontakter fra de gemte kørsler
-        contacts = [c for r in data.get("runs", []) for c in r.get("contacts", [])]
+    if args.action == "setup":
+        out = args.out or "setup.json"
+        Path(out).write_text(json.dumps(setup(), ensure_ascii=False, indent=1), encoding="utf-8")
+        print(f"Opsætning skrevet til {out}")
+        return
+    path = Path(args.jobs)
+    history = json.loads(path.read_text(encoding="utf-8"))
+    if args.action == "plan":
+        result = plan(history)
+        Path(args.out).write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+        print(f"Kontaktark: {len(result['kontakter_rows'])} nye personer, "
+              f"{len(result['opslag_rows'])} nye linjer i Opslag. Skrevet til {args.out}")
     else:
-        contacts = data
-    bad = [c for c in contacts if (c.get("role") or "") not in ROLES]
-    if bad:
-        raise SystemExit(f"Ukendt rolle i {len(bad)} kontakter (brug {', '.join(ROLES)}): "
-                         f"{', '.join(c.get('name', '?') for c in bad[:5])}")
-    rows, added, updated = merge(load_existing(args.existing), contacts)
-
-    def cell(r, i):
-        if HEADER[i] in ("Status", "Noter"):
-            return r[i]
-        if HEADER[i] == "Antal opslag":
-            return int(r[i]) if str(r[i]).isdigit() else r[i]
-        return _text(r[i])
-    values = [HEADER] + [[cell(r, i) for i in range(len(HEADER))] for r in rows]
-    tab = args.tab.replace("'", "''")
-    Path(args.out).write_text(json.dumps({"range": f"'{tab}'!A1", "values": values},
-                                         ensure_ascii=False, indent=1), encoding="utf-8")
-    if args.csv:
-        with open(args.csv, "w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerows([HEADER] + rows)
-    print(f"Kontaktark: {len(rows)} personer, heraf {added} nye. Skrevet til {args.out}")
+        n = mark(history)
+        path.write_text(json.dumps(history, ensure_ascii=False, indent=1), encoding="utf-8")
+        from render_page import render_html
+        (path.parent / "index.html").write_text(render_html(history), encoding="utf-8")
+        print(f"{n} kontakter markeret som skrevet; {len(history['contact_keys'])} personer i arket.")
 
 
 if __name__ == "__main__":

@@ -71,12 +71,32 @@ Resultatside: https://claude.ai/artifact/CqRmLzWfJJTaSDkE3brsbi
        --history <arbejdsmappe>/jobs.json --out-dir site
    ```
 
-6. Publicér til den eksisterende side (samme URL, ingen ny side):
+6. Opdatér kontaktarket (Google Sheet "Kontaktpersoner fra jobopslag",
+   id `1K9E-a0IZpDEv5fE4SX75pGPYBm0APTbCAnDBhMv31_k`). Kræver Google Sheets-forbindelsen.
+   Arket har fanen `Kontakter` (én række pr. person; fokus, opslag, antal og datoer er
+   formler) og fanen `Opslag` (én linje pr. person pr. opslag). Der tilføjes kun rækker;
+   eksisterende rækker læses og ændres aldrig.
+   - `python merge_contacts.py plan --jobs site/jobs.json --out sync.json`
+     (tager alle kontakter i historikken, der ikke er skrevet endnu, så en dag hvor arket ikke
+     kunne skrives, bliver indhentet).
+   - Er `opslag_rows` ikke tom: Sheets `append_values`, `range: "'Opslag'!A1"`, `values` =
+     `opslag_rows`. Er `kontakter_rows` ikke tom: `append_values`, `range: "'Kontakter'!A1"`,
+     `values` = `kontakter_rows` (formlerne skal med uændret).
+   - Lykkedes begge (eller var der intet at skrive):
+     `python merge_contacts.py mark --jobs site/jobs.json`. Det markerer kontakterne som skrevet
+     i `site/jobs.json` og bygger `site/index.html` igen. Fejlede en af dem, så spring `mark`
+     over; næste kørsel prøver igen.
+   - Læs de sidste nye rækker i `Kontakter` med `get_values` og tjek, at kolonnen
+     "Antal opslag" viser et tal og ikke en fejl.
+   Er Google Sheets-værktøjerne ikke tilgængelige, så spring trinnet over og skriv det i
+   opsummeringen.
+
+7. Publicér til den eksisterende side (samme URL, ingen ny side):
    Artifact `action: "publish"`, `url: <resultatside>`, `file_path: site/index.html`,
    `files: {"jobs.json": "site/jobs.json"}`. Udelad `icon` og `capabilities`
    (siden har database-capability; udeladt bevares den, og Mads' gemte opslag med den).
 
-7. Tjek Mads' gemte opslag. Siden gemmer markeringer i sin database (samlingen `marks`).
+8. Tjek Mads' gemte opslag. Siden gemmer markeringer i sin database (samlingen `marks`).
    - Hent dem: ArtifactData `action: "list"`, `url: <resultatside>`, `collection: "marks"`,
      `out_dir: marks`. Er samlingen tom, så spring resten af trinnet over.
    - Gem list-svarets tekst (linjerne med `"<doc_id>" … version N`) ordret i
@@ -87,23 +107,8 @@ Resultatside: https://claude.ai/artifact/CqRmLzWfJJTaSDkE3brsbi
      `action: "batch"` (højst 50 pr. kald). Afvises batchen pga. version (Mads har ændret en
      markering imens), så hent listen igen og kør scriptet én gang til. Ændr kun `check`.
 
-8. Opdatér kontaktarket (Google Sheet "Kontaktpersoner fra jobopslag", id `1K9E-a0IZpDEv5fE4SX75pGPYBm0APTbCAnDBhMv31_k`,
-   fanen `Kontakter`). Kræver Google Sheets-forbindelsen.
-   - Første gang: læs `get_spreadsheet` med `fields: ["sheets.properties"]`. Hedder første fane
-     ikke `Kontakter`, så omdøb den (`updateSheetProperties`, `fields: "title"`) og formatér i
-     samme `update_spreadsheet`-kald: fast række 1, fed overskrift, tekstombrydning i kolonne
-     F, G og H, og bredder A–E 160, F–G 320, H 240, I 120, J–L 90, M–O 160, P–Q 140 pixels.
-   - Læs arket: Sheets `get_values`, `range: "'Kontakter'!A:Q"`. Gem svaret i `sheet.json`.
-   - Flet: `python merge_contacts.py --new site/jobs.json --existing sheet.json --out sheet_values.json`.
-     Scriptet tager kontakter fra alle kørsler i historikken, så en dag hvor arket ikke kunne
-     skrives, bliver indhentet. Samme person samles i én række; Status og Noter røres ikke.
-   - Skriv: Sheets `update_values` med `range` og `values` fra `sheet_values.json`.
-   - Læs de første rækker igen med `get_values` og tjek, at overskriften står i række 1.
-   Er Google Sheets-værktøjerne ikke tilgængelige, så spring trinnet over og skriv det i
-   opsummeringen.
-
 9. Afslut med én linje: antal nye opslag og fordelingen grøn/gul/rød, eventuelle
    kilder der gav 0 opslag, antal gemte opslag tjekket (heraf taget ned), og antal nye
-   kontaktpersoner i arket.
+   personer og linjer i kontaktarket.
 
 Ændr ikke koden i repoet under en planlagt kørsel.
