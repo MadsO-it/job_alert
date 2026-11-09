@@ -14,3 +14,9 @@ venv/
 # Lokal state
 seen_jobs.json
 jobs_*.json
+
+# Profiler og state (kan indeholde personlige oplysninger)
+profile.json
+profiles/
+state/
+dry_run_email.html

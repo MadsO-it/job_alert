@@ -15,6 +15,7 @@ Bygget for at slippe for at scrolle jobsider hver dag. Det er min egen kandidat-
 To måder at køre det på:
 
 - **Lokalt (Mac):** `python job_alert.py` sender en HTML-mail grupperet efter farve. Køres ugentligt via `launchd`.
+- **GitHub Actions med mail:** samme kørsel som lokalt, men på GitHubs servere og med en profil fra en secret, så værktøjet kan køre for andre end mig. Se [GITHUB_ACTIONS.md](GITHUB_ACTIONS.md).
 - **I skyen:** en planlagt Claude-session følger [CLOUD_RUN.md](CLOUD_RUN.md), laver selv farvevurderingen og opdaterer en privat resultatside. Kræver hverken computer, SMTP eller API-nøgle. På resultatsiden kan opslag gemmes; de bliver stående øverst, til de er markeret som søgt eller er taget ned (`check_saved.py` tjekker dem hver morgen).
 
 ## Hvorfor
@@ -81,6 +82,7 @@ Det meste står i toppen af `job_alert.py`:
 | Geografisk filtrering | `CPH_LOCATIONS`, `EXCLUDED_LOCATIONS` |
 | Profil til AI-vurdering | `CANDIDATE_PROFILE` |
 | Mail-skabelon | `build_html_email`, `build_plain_text_email` |
+| Anden person/profil | `--profile profil.json` (se `apply_profile`) |
 
 ## Begrænsninger
 

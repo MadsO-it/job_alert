@@ -117,16 +117,25 @@ def load_seen_jobs() -> set:
     return set()
 
 def save_seen_jobs(seen: set) -> None:
+    SEEN_JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
     SEEN_JOBS_FILE.write_text(
         json.dumps({"seen_links": sorted(seen), "updated": datetime.now().isoformat()},
                    ensure_ascii=False, indent=2),
         encoding="utf-8"
     )
 
+def _norm_link(link: str) -> str:
+    """Link uden query-parametre (sporingsparametre o.l.). Undtagelse: sider hvor opslagets id
+    står i queryen (psykologjob.dk: /job/?job=8656) beholder netop den parameter."""
+    link = link or ""
+    base = link.split("?")[0].rstrip("/")
+    m = re.search(r"[?&]job=(\d+)", link) if "psykologjob.dk" in base else None
+    return f"{base}/?job={m.group(1)}" if m else base
+
 def filter_new_jobs(jobs: list[dict], seen: set) -> list[dict]:
     new = []
     for job in jobs:
-        link = job.get("link", "").split("?")[0].rstrip("/")
+        link = _norm_link(job.get("link", ""))
         if link and link not in seen:
             new.append(job)
     return new
@@ -182,15 +191,20 @@ GENERIC_LOCATION_WORDS = ["remote", "hjemmearbejde", "hybrid", "fleksibel", "hel
 STRICT_LOCATION_SOURCES = {"StepStone"}
 
 def is_copenhagen_area(job: dict) -> bool:
+    # strict_location sættes af kilder der søger bredere end Storkøbenhavn (fx Jobindex' område
+    # "sjaelland" eller psykologjob.dk's Region Sjælland). Her kræves et kendt KBH-område.
+    strict = bool(job.get("strict_location"))
     location = (job.get("location") or "").lower().strip()
     if not location:
-        return True
+        return not strict
     for cph in CPH_LOCATIONS:
         if cph in location:
             return True
     for city in NON_CPH_LOCATIONS:
         if city in location:
             return False
+    if strict:
+        return False
     if any(w in location for w in GENERIC_LOCATION_WORDS):
         return True
     return job.get("source") not in STRICT_LOCATION_SOURCES
@@ -381,7 +395,28 @@ STEPSTONE_SEARCHES = [
     ("it", None, "IT (alle kategorier)"),
 ]
 
-# Grov forfiltrering – fanger åbenlyse ikke-IT opslag inden AI-kaldet
+# Kilder der søges i. Kan ændres pr. profil (se --profile og apply_profile).
+ENABLED_SOURCES = {"itjobbank", "jobindex", "stepstone", "career_sites"}
+
+# Jobindex-områder. storkoebenhavn afgrænser selv; øvrige områder (fx "sjaelland")
+# filtreres strengt på kendte KBH-byer i CPH_LOCATIONS.
+JOBINDEX_AREAS = ["storkoebenhavn"]
+
+# psykologjob.dk (Dansk Psykolog Forenings jobbase). Regionskoder:
+# 1084 = Region Hovedstaden, 1085 = Region Sjælland (filtreres strengt på KBH-byer).
+PSYKOLOGJOB_REGIONS = [1084, 1085]
+PSYKOLOGJOB_STRICT_REGIONS = {1085}
+
+# Mail: skjul røde opslag (vises kun som et antal). Sættes pr. profil.
+EMAIL_HIDE_RED = False
+
+# Krav-mønster (regex): når sat, beholdes kun opslag hvor titlen eller annoncens første
+# REQUIRE_CHARS tegn matcher. Bruges til brede søgninger, hvor fritekstsøgningen også
+# rammer mange andre faggrupper. Tom = intet krav (standard).
+REQUIRE_PATTERN = ""
+REQUIRE_CHARS = 400
+
+# Grov forfiltrering – fanger åbenlyse ikke-IT opslag inden AI-kaldet (kan ændres pr. profil)
 HARD_EXCLUDE = [
     "elektriker", "tømrer", "murer", "chauffør", "sygeplejerske", "læge",
     "pædagog", "socialrådgiver", "håndværker", "mekaniker", "bager",
@@ -411,6 +446,14 @@ def title_exclude_reason(job: dict) -> str | None:
         if rx.search(title):
             return name
     return None
+
+
+def require_reason(job: dict) -> str | None:
+    """'krav' hvis profilens krav-mønster ikke findes i titel eller annoncens begyndelse."""
+    if not REQUIRE_PATTERN:
+        return None
+    text = f"{job.get('title', '')} {(job.get('description') or '')[:REQUIRE_CHARS]}"
+    return None if re.search(REQUIRE_PATTERN, text, re.IGNORECASE) else "krav"
 
 
 def hard_exclude(job: dict) -> bool:
@@ -645,14 +688,15 @@ def add_full_texts(jobs: list[dict], workers: int = 4) -> None:
     print(f"  Fuld tekst hentet for {ok}/{len(jobs)} (resten beholder teaseren); "
           f"kontaktafsnit fundet i {n_contact}")
 
-def scrape_jobindex(search_term: str) -> list[dict]:
+def scrape_jobindex(search_term: str, area: str = "storkoebenhavn") -> list[dict]:
     """Scraper Jobindex via Stash JSON variabel embedded i HTML.
-    Jobindex bruger /jobsoegning/storkoebenhavn?q=TERM og embedder jobdata i siden."""
+    Jobindex bruger /jobsoegning/<område>?q=TERM og embedder jobdata i siden.
+    Opslag fra andre områder end storkoebenhavn får strict_location (kræver kendt KBH-by)."""
     jobs = []
     encoded = quote_plus(search_term)
     try:
         results = _fetch_stash_pages(
-            lambda page: f"https://www.jobindex.dk/jobsoegning/storkoebenhavn?q={encoded}&sort=date&page={page}",
+            lambda page: f"https://www.jobindex.dk/jobsoegning/{area}?q={encoded}&sort=date&page={page}",
             JOBINDEX_PAGES, 20)
         for job in results:
             headline = job.get("headline", "")
@@ -675,6 +719,7 @@ def scrape_jobindex(search_term: str) -> list[dict]:
                 "source":      "Jobindex",
                 "category":    search_term,
                 "description": _html_to_text(job.get("html", "")),
+                "strict_location": area != "storkoebenhavn",
             })
     except Exception as e:
         print(f"  [Jobindex] Fejl ved '{search_term}': {e}")
@@ -793,6 +838,51 @@ def scrape_stepstone(category_path: str, geoarea_id, category_name: str) -> list
 
 # ─── Deduplicering ────────────────────────────────────────────────────────────
 
+def scrape_psykologjob(region: int) -> list[dict]:
+    """Scraper psykologjob.dk (Dansk Psykolog Forenings jobbase) for én region.
+    Listen er almindelig HTML (div.dbj_jobbox). Opslagene har ingen opslagsdato, kun frist."""
+    jobs = []
+    url = (f"https://www.psykologjob.dk/job/?searchit=&searchbeliggenhed="
+           f"&searchRegion={region}&searchKommune=&tag2=")
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        if resp.status_code != 200:
+            print(f"  [Psykologjob] HTTP {resp.status_code} for region {region}")
+            return []
+        page = _decode(resp)
+        for box in page.split('class="dbj_jobbox"')[1:]:
+            link = re.search(r'<h2 class="dbj_jobHeadline"[^>]*>\s*<a href="([^"]+)"[^>]*>(.*?)</a>', box, re.S)
+            if not link:
+                continue
+            company = re.search(r'class="dbj_jobCompanyname">(.*?)</div>', box, re.S)
+            meta = re.search(r'</div><div>([^<]*?\|[^<]*)</div>', box)
+            parts = [html_lib.unescape(x).replace("\xa0", " ").strip()
+                     for x in (meta.group(1).split("|") if meta else [])]
+            deadline = ""
+            for part in parts:
+                m = re.search(r"(\d{2})-(\d{2})-(\d{4})", part)
+                if m:
+                    deadline = f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
+            job_id = re.search(r"job=(\d+)", link.group(1))
+            if not job_id:
+                continue
+            jobs.append({
+                "title":       _html_to_text(link.group(2), 300),
+                "company":     _html_to_text(company.group(1), 200) if company else "Se opslag",
+                "date":        "",
+                "location":    parts[1] if len(parts) > 1 else "",
+                "link":        f"https://www.psykologjob.dk/job/?job={job_id.group(1)}",
+                "deadline":    deadline,
+                "source":      "Psykologjob",
+                "category":    parts[0] if parts else "",
+                "description": "",
+                "strict_location": region in PSYKOLOGJOB_STRICT_REGIONS,
+            })
+    except Exception as e:
+        print(f"  [Psykologjob] Fejl ved region {region}: {e}")
+    return jobs
+
+
 def _norm_text(text: str) -> str:
     text = html_lib.unescape(text or "").replace("\\/", "/").lower()
     return re.sub(r"[^0-9a-zæøåäöü]+", " ", text).strip()
@@ -820,7 +910,7 @@ def deduplicate(jobs: list[dict]) -> list[dict]:
     """Fjerner dubletter: samme link, eller samme virksomhed med næsten samme titel."""
     seen_links, known, unique = set(), {}, []
     for job in jobs:
-        link = job.get("link", "").split("?")[0].rstrip("/")
+        link = _norm_link(job.get("link", ""))
         key  = job_key(job)
         if not link or link in seen_links or is_near_duplicate(key, known):
             continue
@@ -847,44 +937,61 @@ def collect_jobs() -> tuple[list[dict], list[dict]]:
     Returnerer (beholdte opslag, frasorterede opslag med feltet 'excluded_by').
     Antal råopslag pr. kilde gemmes i SOURCE_STATUS."""
     all_jobs = []
-    board_counts: dict[str, list[int]] = {"Jobindex": [], "IT Jobbank": [], "StepStone": []}
+    board_names = {"jobindex": "Jobindex", "itjobbank": "IT Jobbank", "stepstone": "StepStone",
+                   "psykologjob": "Psykologjob"}
+    board_counts: dict[str, list[int]] = {name: [] for key, name in board_names.items()
+                                          if key in ENABLED_SOURCES}
     career_status: list[dict] = []
 
     print(f"\n{'='*60}")
     print(f"Job Alert Scraper – {datetime.now().strftime('%d/%m/%Y %H:%M')}")
     print(f"{'='*60}")
 
-    print("\nSøger på IT Jobbank...")
-    for slug, location, name in ITJOBBANK_SEARCHES:
-        jobs = scrape_itjobbank(slug, location, name)
-        all_jobs.extend(jobs)
-        board_counts["IT Jobbank"].append(len(jobs))
-        print(f"  {name}: {len(jobs)} opslag")
-        time.sleep(0.5)
+    if "itjobbank" in ENABLED_SOURCES:
+        print("\nSøger på IT Jobbank...")
+        for slug, location, name in ITJOBBANK_SEARCHES:
+            jobs = scrape_itjobbank(slug, location, name)
+            all_jobs.extend(jobs)
+            board_counts["IT Jobbank"].append(len(jobs))
+            print(f"  {name}: {len(jobs)} opslag")
+            time.sleep(0.5)
 
-    print("\nSøger på Jobindex...")
-    for term in JOBINDEX_SEARCH_TERMS:
-        jobs = scrape_jobindex(term)
-        all_jobs.extend(jobs)
-        board_counts["Jobindex"].append(len(jobs))
-        print(f"  '{term}': {len(jobs)} opslag")
-        time.sleep(0.8)
+    if "jobindex" in ENABLED_SOURCES:
+        print("\nSøger på Jobindex...")
+        for area in JOBINDEX_AREAS:
+            for term in JOBINDEX_SEARCH_TERMS:
+                jobs = scrape_jobindex(term, area)
+                all_jobs.extend(jobs)
+                board_counts["Jobindex"].append(len(jobs))
+                print(f"  '{term}' ({area}): {len(jobs)} opslag")
+                time.sleep(0.8)
 
-    print("\nSøger på StepStone...")
-    for path, geoid, name in STEPSTONE_SEARCHES:
-        jobs = scrape_stepstone(path, geoid, name)
-        all_jobs.extend(jobs)
-        board_counts["StepStone"].append(len(jobs))
-        print(f"  {name}: {len(jobs)} opslag")
-        time.sleep(0.5)
+    if "psykologjob" in ENABLED_SOURCES:
+        print("\nSøger på Psykologjob...")
+        for region in PSYKOLOGJOB_REGIONS:
+            jobs = scrape_psykologjob(region)
+            all_jobs.extend(jobs)
+            board_counts["Psykologjob"].append(len(jobs))
+            print(f"  Region {region}: {len(jobs)} opslag")
+            time.sleep(0.5)
 
-    print("\nSøger på målvirksomhedernes karrieresider...")
-    try:
-        from career_sites import scrape_career_sites
-        all_jobs.extend(scrape_career_sites(career_status))
-    except Exception as e:
-        print(f"  [Karrieresider] Fejl: {e}")
-        career_status = [{"name": "Karrieresider (alle)", "count": 0, "error": str(e)[:120]}]
+    if "stepstone" in ENABLED_SOURCES:
+        print("\nSøger på StepStone...")
+        for path, geoid, name in STEPSTONE_SEARCHES:
+            jobs = scrape_stepstone(path, geoid, name)
+            all_jobs.extend(jobs)
+            board_counts["StepStone"].append(len(jobs))
+            print(f"  {name}: {len(jobs)} opslag")
+            time.sleep(0.5)
+
+    if "career_sites" in ENABLED_SOURCES:
+        print("\nSøger på målvirksomhedernes karrieresider...")
+        try:
+            from career_sites import scrape_career_sites
+            all_jobs.extend(scrape_career_sites(career_status))
+        except Exception as e:
+            print(f"  [Karrieresider] Fejl: {e}")
+            career_status = [{"name": "Karrieresider (alle)", "count": 0, "error": str(e)[:120]}]
 
     SOURCE_STATUS.clear()
     SOURCE_STATUS.update({
@@ -908,13 +1015,13 @@ def collect_jobs() -> tuple[list[dict], list[dict]]:
     for job in cph_jobs:
         if hard_exclude(job):
             continue
-        reason = title_exclude_reason(job)
+        reason = title_exclude_reason(job) or require_reason(job)
         if reason:
             job["excluded_by"] = reason
             excluded.append(job)
         else:
             kept.append(job)
-    print(f"Efter titelfilter (senior, test, support, engineer mv.): {len(kept)} "
+    print(f"Efter titelfilter (senior, test, support, engineer mv.{', krav' if REQUIRE_PATTERN else ''}): {len(kept)} "
           f"({len(excluded)} frasorteret)")
     return kept, excluded
 
@@ -966,6 +1073,10 @@ def build_html_email(jobs: list[dict]) -> str:
         group = [j for j in jobs if j.get("rating", "unrated") == key]
         if not group:
             continue
+        if key == "red" and EMAIL_HIDE_RED:
+            sections += (f'<p style="color:#666;font-size:13px;margin:24px 0 0;">'
+                         f'{len(group)} opslag vurderet som dårligt match er ikke vist.</p>')
+            continue
         cards = "".join(job_card(j) for j in group)
         sections += f"""
         <h2 style="color:{color};font-size:17px;margin:24px 0 10px;border-bottom:2px solid {color};padding-bottom:6px;">
@@ -995,6 +1106,9 @@ def build_plain_text_email(jobs: list[dict]) -> str:
     for key, (label, _, _) in RATING_LABELS.items():
         group = [j for j in sort_by_rating(jobs) if j.get("rating", "unrated") == key]
         if not group:
+            continue
+        if key == "red" and EMAIL_HIDE_RED:
+            lines += [f"{len(group)} opslag vurderet som dårligt match er ikke vist.", ""]
             continue
         lines += [f"== {label.upper()} ({len(group)}) =="]
         for job in group:
@@ -1043,8 +1157,63 @@ def send_email(jobs: list[dict]) -> bool:
 
 # ─── Hoved-funktion ───────────────────────────────────────────────────────────
 
-def _norm_link(link: str) -> str:
-    return (link or "").split("?")[0].rstrip("/")
+# ─── Profiler ─────────────────────────────────────────────────────────────────
+#
+# Uden --profile kører scriptet med konfigurationen ovenfor (Mads' profil), præcis som før.
+# En profil er en JSON-fil, der overskriver udvalgte indstillinger, så samme kode kan køre
+# for flere personer. Alle nøgler er valgfrie:
+#   candidate_profile, rating_rules        tekst til Claude-vurderingen
+#   sources                                fx ["jobindex", "psykologjob"]
+#                                          (mulige: itjobbank, jobindex, stepstone,
+#                                          career_sites, psykologjob)
+#   jobindex_search_terms, jobindex_areas  søgeord og områder på Jobindex
+#   psykologjob_regions                    regionskoder på psykologjob.dk
+#   hard_exclude                           titelord der sorteres fra før vurderingen
+#   title_exclude                          hvilke af TITLE_EXCLUDE_PATTERNS der bruges (navne)
+#   seen_file                              sti til dublethukommelsen (relativ til scriptet)
+#   email_hide_red                         true = røde opslag vises kun som et antal
+#   require_pattern                        regex der skal findes i titel eller annoncens start
+# Profilen kan indeholde personlige oplysninger og skal ikke committes. I GitHub Actions
+# ligger den som secret (se GITHUB_ACTIONS.md).
+
+PROFILE_KEYS = {
+    "candidate_profile":     "CANDIDATE_PROFILE",
+    "rating_rules":          "RATING_RULES",
+    "jobindex_search_terms": "JOBINDEX_SEARCH_TERMS",
+    "jobindex_areas":        "JOBINDEX_AREAS",
+    "psykologjob_regions":   "PSYKOLOGJOB_REGIONS",
+    "hard_exclude":          "HARD_EXCLUDE",
+    "email_hide_red":        "EMAIL_HIDE_RED",
+    "require_pattern":       "REQUIRE_PATTERN",
+}
+
+
+def apply_profile(path: str) -> None:
+    """Indlæser en profil-JSON og overskriver de tilsvarende indstillinger i modulet."""
+    global ENABLED_SOURCES, SEEN_JOBS_FILE, _TITLE_EXCLUDE_RE
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    unknown = set(data) - set(PROFILE_KEYS) - {"name", "sources", "title_exclude", "seen_file"}
+    if unknown:
+        sys.exit(f"FEJL: Ukendte nøgler i profilen: {', '.join(sorted(unknown))}")
+    for key, name in PROFILE_KEYS.items():
+        if key in data:
+            globals()[name] = data[key]
+    if "sources" in data:
+        valid = {"itjobbank", "jobindex", "stepstone", "career_sites", "psykologjob"}
+        bad = set(data["sources"]) - valid
+        if bad:
+            sys.exit(f"FEJL: Ukendte kilder i profilen: {', '.join(sorted(bad))}")
+        ENABLED_SOURCES = set(data["sources"])
+    if "title_exclude" in data:
+        bad = set(data["title_exclude"]) - set(TITLE_EXCLUDE_PATTERNS)
+        if bad:
+            sys.exit(f"FEJL: Ukendte titelfiltre i profilen: {', '.join(sorted(bad))}")
+        _TITLE_EXCLUDE_RE = {k: re.compile(TITLE_EXCLUDE_PATTERNS[k], re.IGNORECASE)
+                             for k in data["title_exclude"]}
+    if "seen_file" in data:
+        seen = Path(data["seen_file"])
+        SEEN_JOBS_FILE = seen if seen.is_absolute() else SCRIPT_DIR / seen
+    print(f"Profil indlæst: {data.get('name', path)} · kilder: {', '.join(sorted(ENABLED_SOURCES))}")
 
 
 def export_jobs(out_path: str, seen_path: str | None) -> None:
@@ -1074,7 +1243,7 @@ def export_jobs(out_path: str, seen_path: str | None) -> None:
     print(f"Skrevet til {out_path}")
 
 
-def run_job_alert() -> None:
+def run_job_alert(dry_run: bool = False) -> None:
     """Mac-tilstand: scrape, filtrér, lad Claude inddele i grøn/gul/rød, send mail med nye opslag."""
     kept, _ = collect_jobs()
 
@@ -1092,6 +1261,12 @@ def run_job_alert() -> None:
         for j in new_jobs:
             j["rating"] = "unrated"
 
+    if dry_run:
+        out = SCRIPT_DIR / "dry_run_email.html"
+        out.write_text(build_html_email(new_jobs), encoding="utf-8")
+        print(f"\nDry run: mail skrevet til {out} (intet sendt, hukommelsen er ikke opdateret)")
+        return
+
     print(f"\nSender e-mail til {RECIPIENT_EMAIL}...")
     success = send_email(new_jobs)
 
@@ -1099,11 +1274,17 @@ def run_job_alert() -> None:
         seen.update(_norm_link(j.get("link")) for j in new_jobs if j.get("link"))
         save_seen_jobs(seen)
         print(f"Gemt {len(new_jobs)} nye opslag i hukommelsen.")
+    if not success:
+        sys.exit(1)   # så en planlagt kørsel (fx GitHub Actions) melder fejl
 
 
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="Job Alert")
+    ap.add_argument("--profile", metavar="FIL",
+                    help="Profil-JSON der overskriver standardopsætningen (se apply_profile)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Kør som normalt, men skriv mailen til dry_run_email.html i stedet for at sende")
     ap.add_argument("--export", metavar="FIL", help="Skriv nye, filtrerede opslag til JSON (ingen AI, ingen mail)")
     ap.add_argument("--seen", metavar="FIL", help="Tidligere jobs.json/seen_jobs.json at udelukke fra --export")
     ap.add_argument("--since", type=int, metavar="DAGE",
@@ -1113,6 +1294,8 @@ if __name__ == "__main__":
     ap.add_argument("--count", type=int, default=25, help="Med --show: antal opslag")
     ap.add_argument("--chars", type=int, default=1500, help="Med --show: tegn beskrivelse per opslag")
     args = ap.parse_args()
+    if args.profile:
+        apply_profile(args.profile)
     if args.since:
         from datetime import timedelta
         CUTOFF_DATE = (datetime.now(ZoneInfo("Europe/Copenhagen")) - timedelta(days=args.since)).strftime("%Y-%m-%d")
@@ -1127,4 +1310,4 @@ if __name__ == "__main__":
     elif args.export:
         export_jobs(args.export, args.seen)
     else:
-        run_job_alert()
+        run_job_alert(dry_run=args.dry_run)

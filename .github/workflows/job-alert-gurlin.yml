@@ -1,0 +1,75 @@
+# Ugentlig job alert for Gurlin, sendt som mail.
+# Opsætning og secrets: se GITHUB_ACTIONS.md.
+name: Job Alert (Gurlin)
+
+on:
+  schedule:
+    # Mandag 05:23 UTC = 06:23 dansk vintertid / 07:23 sommertid.
+    # GitHub kan forsinke planlagte kørsler med op til en time.
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Byg mailen uden at sende den"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: job-alert-gurlin
+  cancel-in-progress: false
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installér afhængigheder
+        run: pip install -r requirements.txt
+
+      # Dublethukommelsen (hvilke opslag hun har fået) gemmes i Actions-cachen mellem kørsler.
+      # Forsvinder cachen, forhindrer --since 8 at gamle opslag sendes igen.
+      - name: Hent dublethukommelse
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: seen-gurlin-${{ github.run_id }}
+          restore-keys: seen-gurlin-
+
+      - name: Skriv profil fra secret
+        env:
+          JOB_PROFILE: ${{ secrets.GURLIN_PROFILE }}
+        run: |
+          if [ -z "$JOB_PROFILE" ]; then echo "Secret GURLIN_PROFILE mangler"; exit 1; fi
+          printf '%s' "$JOB_PROFILE" > profile.json
+
+      - name: Kør job alert
+        env:
+          RECIPIENT_EMAIL: ${{ secrets.GURLIN_EMAIL }}
+          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_HOST: ${{ vars.SMTP_HOST || 'send.one.com' }}
+          SMTP_PORT: ${{ vars.SMTP_PORT || '587' }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python job_alert.py --profile profile.json --since 8 --dry-run
+          else
+            python job_alert.py --profile profile.json --since 8
+          fi
+
+      - name: Gem dublethukommelse
+        if: success() && hashFiles('state/*.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: seen-gurlin-${{ github.run_id }}
