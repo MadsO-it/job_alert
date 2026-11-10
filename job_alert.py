@@ -926,9 +926,14 @@ def is_near_duplicate(key: tuple[str, str], known: dict[str, list[str]], thresho
     """Samme virksomhed og næsten samme titel (fx 'IT og ...' vs 'IT- og ...')."""
     from difflib import SequenceMatcher
     company, title = key
-    for other in known.get(company, []):
-        if title == other or SequenceMatcher(None, title, other).ratio() >= threshold:
-            return True
+    # Samme virksomhed, også når den ene kilde skriver mere af navnet
+    # (fx "dignity" og "dignity dansk institut mod tortur").
+    companies = [c for c in known if c == company or (company and c and
+                 (c.startswith(company + " ") or company.startswith(c + " ")))]
+    for c in companies:
+        for other in known[c]:
+            if title == other or SequenceMatcher(None, title, other).ratio() >= threshold:
+                return True
     return False
 
 
