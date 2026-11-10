@@ -260,6 +260,9 @@ trækker de op.
 """
 
 RATING_ORDER = {"green": 0, "yellow": 1, "red": 2, "unrated": 3}
+
+# Bed Claude om en kort begrundelse pr. opslag og vis den i mailen. Sættes pr. profil.
+RATING_REASONS = False
 _COLOR_WORDS = {
     "grøn": "green", "groen": "green", "green": "green",
     "gul": "yellow", "yellow": "yellow",
@@ -293,11 +296,20 @@ def ai_classify_jobs(jobs: list[dict], api_key: str) -> list[dict]:
      Beskrivelse: {desc[:1500]}
 """
 
+        if RATING_REASONS:
+            answer_format = """Svar KUN med et JSON-objekt der mapper opslagets nummer til farve og begrundelse, f.eks.:
+{"1": {"farve": "grøn", "grund": "PPR-psykolog med børn; ingen krav hun ikke opfylder"},
+ "2": {"farve": "rød", "grund": "Kræver specialistgodkendelse"}}
+Begrundelsen er én kort sætning på dansk (højst 20 ord), der nævner det afgørende for farven.
+Ingen anden tekst, kun JSON."""
+        else:
+            answer_format = """Svar KUN med et JSON-objekt der mapper opslagets nummer til farven, f.eks.:
+{"1": "grøn", "2": "gul", "3": "rød"}
+Ingen forklaring, kun JSON."""
+
         prompt = f"""{CANDIDATE_PROFILE}
 {RATING_RULES}
-Svar KUN med et JSON-objekt der mapper opslagets nummer til farven, f.eks.:
-{{"1": "grøn", "2": "gul", "3": "rød"}}
-Ingen forklaring, kun JSON.
+{answer_format}
 
 Jobopslag:
 {job_list}"""
@@ -312,7 +324,7 @@ Jobopslag:
                 },
                 json={
                     "model": "claude-haiku-4-5",
-                    "max_tokens": 300,
+                    "max_tokens": 1500 if RATING_REASONS else 300,
                     "messages": [{"role": "user", "content": prompt}],
                 },
                 timeout=30,
@@ -321,10 +333,16 @@ Jobopslag:
                 content = response.json()["content"][0]["text"]
                 m = re.search(r'\{.*\}', content, re.DOTALL)
                 ratings = json.loads(m.group()) if m else {}
-                for key, color in ratings.items():
+                for key, value in ratings.items():
                     idx = int(str(key).strip()) - 1
-                    if 0 <= idx < len(batch):
-                        batch[idx]["rating"] = _COLOR_WORDS.get(str(color).strip().lower(), "unrated")
+                    if not 0 <= idx < len(batch):
+                        continue
+                    color, reason = value, ""
+                    if isinstance(value, dict):
+                        color, reason = value.get("farve", ""), str(value.get("grund", "")).strip()
+                    batch[idx]["rating"] = _COLOR_WORDS.get(str(color).strip().lower(), "unrated")
+                    if reason:
+                        batch[idx]["reason"] = reason[:200]
             else:
                 print(f"  Claude API fejl {response.status_code}: {response.text[:200]}")
         except Exception as e:
@@ -1138,6 +1156,8 @@ def build_html_email(jobs: list[dict]) -> str:
 
     def job_card(job: dict) -> str:
         label, color, bg = RATING_LABELS[job.get("rating", "unrated")]
+        reason = (f'<div style="color:#333;font-size:13px;margin-top:6px;font-style:italic;">'
+                  f'{html_lib.escape(job["reason"])}</div>') if job.get("reason") else ""
         deadline = job.get("deadline", "")
         deadline = f"Frist: {format_date(deadline) if deadline[:1].isdigit() else deadline}" if deadline else ""
         meta = " · ".join(x for x in [job.get("company", ""), job.get("location", ""),
@@ -1145,7 +1165,7 @@ def build_html_email(jobs: list[dict]) -> str:
         return f"""
         <div style="background:#fff;border:1px solid #e0e0e0;border-left:5px solid {color};border-radius:6px;padding:12px 16px;margin-bottom:10px;">
           <a href="{job.get('link', '')}" style="color:#1a1a2e;text-decoration:none;font-size:15px;font-weight:600;">{job.get('title', '')}</a>
-          <div style="color:#555;font-size:13px;margin-top:4px;">{meta}</div>
+          <div style="color:#555;font-size:13px;margin-top:4px;">{meta}</div>{reason}
         </div>"""
 
     sections = ""
@@ -1194,6 +1214,8 @@ def build_plain_text_email(jobs: list[dict]) -> str:
         lines += [f"== {label.upper()} ({len(group)}) =="]
         for job in group:
             lines.append(f"{job.get('title', '')} · {job.get('company', '')} · {job.get('location', '')}")
+            if job.get("reason"):
+                lines.append(f"  {job['reason']}")
             lines.append(f"  {job.get('link', '')}")
         lines.append("")
     lines += ["== KILDESTATUS =="] + [("! " if bad else "  ") + text for bad, text in source_status_lines()]
@@ -1257,6 +1279,7 @@ def send_email(jobs: list[dict]) -> bool:
 #   seen_file                              sti til dublethukommelsen (relativ til scriptet)
 #   email_hide_red                         true = røde opslag vises kun som et antal
 #   require_pattern                        regex der skal findes i titel eller annoncens start
+#   rating_reasons                         true = én linjes begrundelse for farven i mailen
 # Profilen kan indeholde personlige oplysninger og skal ikke committes. I GitHub Actions
 # ligger den som secret (se GITHUB_ACTIONS.md).
 
@@ -1269,6 +1292,7 @@ PROFILE_KEYS = {
     "hard_exclude":          "HARD_EXCLUDE",
     "email_hide_red":        "EMAIL_HIDE_RED",
     "require_pattern":       "REQUIRE_PATTERN",
+    "rating_reasons":        "RATING_REASONS",
 }
 
 
