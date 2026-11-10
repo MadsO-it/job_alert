@@ -1052,7 +1052,7 @@ def collect_jobs() -> tuple[list[dict], list[dict]]:
             excluded.append(job)
         else:
             kept.append(job)
-    print(f"Efter titelfilter (senior, test, support, engineer mv.{', krav' if REQUIRE_PATTERN else ''}): {len(kept)} "
+    print(f"Efter titelfilter ({', '.join(_TITLE_EXCLUDE_RE)}{', krav' if REQUIRE_PATTERN else ''}): {len(kept)} "
           f"({len(excluded)} frasorteret)")
     FUNNEL["kept"] = len(kept)
     return kept, excluded
@@ -1251,7 +1251,9 @@ def send_email(jobs: list[dict]) -> bool:
 #   jobindex_search_terms, jobindex_areas  søgeord og områder på Jobindex
 #   psykologjob_regions                    regionskoder på psykologjob.dk
 #   hard_exclude                           titelord der sorteres fra før vurderingen
-#   title_exclude                          hvilke af TITLE_EXCLUDE_PATTERNS der bruges (navne)
+#   title_exclude                          hvilke titelfiltre der bruges (navne fra
+#                                          TITLE_EXCLUDE_PATTERNS eller title_exclude_patterns)
+#   title_exclude_patterns                 egne titelfiltre: {"navn": "regex"}
 #   seen_file                              sti til dublethukommelsen (relativ til scriptet)
 #   email_hide_red                         true = røde opslag vises kun som et antal
 #   require_pattern                        regex der skal findes i titel eller annoncens start
@@ -1274,7 +1276,8 @@ def apply_profile(path: str) -> None:
     """Indlæser en profil-JSON og overskriver de tilsvarende indstillinger i modulet."""
     global ENABLED_SOURCES, SEEN_JOBS_FILE, _TITLE_EXCLUDE_RE
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    unknown = set(data) - set(PROFILE_KEYS) - {"name", "sources", "title_exclude", "seen_file"}
+    unknown = set(data) - set(PROFILE_KEYS) - {"name", "sources", "title_exclude",
+                                                "title_exclude_patterns", "seen_file"}
     if unknown:
         sys.exit(f"FEJL: Ukendte nøgler i profilen: {', '.join(sorted(unknown))}")
     for key, name in PROFILE_KEYS.items():
@@ -1286,6 +1289,9 @@ def apply_profile(path: str) -> None:
         if bad:
             sys.exit(f"FEJL: Ukendte kilder i profilen: {', '.join(sorted(bad))}")
         ENABLED_SOURCES = set(data["sources"])
+    if "title_exclude_patterns" in data:
+        TITLE_EXCLUDE_PATTERNS.update(data["title_exclude_patterns"])
+        _TITLE_EXCLUDE_RE = {k: re.compile(v, re.IGNORECASE) for k, v in TITLE_EXCLUDE_PATTERNS.items()}
     if "title_exclude" in data:
         bad = set(data["title_exclude"]) - set(TITLE_EXCLUDE_PATTERNS)
         if bad:
