@@ -406,6 +406,9 @@ JOBINDEX_AREAS = ["storkoebenhavn"]
 # 1084 = Region Hovedstaden, 1085 = Region Sjælland (filtreres strengt på KBH-byer).
 PSYKOLOGJOB_REGIONS = [1084, 1085]
 PSYKOLOGJOB_STRICT_REGIONS = {1085}
+PSYKOLOGJOB_REGION_NAMES = {1081: "Region Nordjylland", 1082: "Region Midtjylland",
+                            1083: "Region Syddanmark", 1084: "Region Hovedstaden",
+                            1085: "Region Sjælland"}
 
 # Mail: skjul røde opslag (vises kun som et antal). Sættes pr. profil.
 EMAIL_HIDE_RED = False
@@ -723,6 +726,7 @@ def scrape_jobindex(search_term: str, area: str = "storkoebenhavn") -> list[dict
             })
     except Exception as e:
         print(f"  [Jobindex] Fejl ved '{search_term}': {e}")
+        _note_error("Jobindex", f"{search_term}: {e}")
     return jobs
 
 
@@ -752,6 +756,7 @@ def scrape_itjobbank(category_slug: str, location: str, category_name: str) -> l
             })
     except Exception as e:
         print(f"  [IT Jobbank] Fejl ved '{category_name}': {e}")
+        _note_error("IT Jobbank", f"{category_name}: {e}")
     return jobs
 
 
@@ -833,6 +838,7 @@ def scrape_stepstone(category_path: str, geoarea_id, category_name: str) -> list
             })
     except Exception as e:
         print(f"  [StepStone] Fejl ved '{category_name}': {e}")
+        _note_error("StepStone", f"{category_name}: {e}")
     return jobs
 
 
@@ -848,6 +854,7 @@ def scrape_psykologjob(region: int) -> list[dict]:
         resp = requests.get(url, headers=HEADERS, timeout=20)
         if resp.status_code != 200:
             print(f"  [Psykologjob] HTTP {resp.status_code} for region {region}")
+            _note_error("Psykologjob", f"{PSYKOLOGJOB_REGION_NAMES.get(region, region)}: HTTP {resp.status_code}")
             return []
         page = _decode(resp)
         for box in page.split('class="dbj_jobbox"')[1:]:
@@ -880,6 +887,7 @@ def scrape_psykologjob(region: int) -> list[dict]:
             })
     except Exception as e:
         print(f"  [Psykologjob] Fejl ved region {region}: {e}")
+        _note_error("Psykologjob", f"{PSYKOLOGJOB_REGION_NAMES.get(region, region)}: {e}")
     return jobs
 
 
@@ -926,10 +934,24 @@ def deduplicate(jobs: list[dict]) -> list[dict]:
 # Skrives til --export-filen, så resultatsiden kan vise kilder der gav 0 eller fejlede.
 SOURCE_STATUS: dict = {}
 
+# Fejl pr. jobportal under seneste collect_jobs() (vises i kildestatus).
+SOURCE_ERRORS: dict[str, list[str]] = {}
 
-def _board_status(name: str, counts: list[int]) -> dict:
+# Tal for filtreringen i seneste kørsel (vises i mailens kildestatus).
+FUNNEL: dict = {}
+
+
+def _note_error(board: str, message: str) -> None:
+    SOURCE_ERRORS.setdefault(board, []).append(message[:160])
+
+
+def _board_status(name: str, entries: list[tuple[str, int]]) -> dict:
+    """entries: (søgningens navn, antal opslag) pr. søgning på portalen."""
+    counts = [c for _, c in entries]
     return {"name": name, "count": sum(counts), "searches": len(counts),
-            "empty_searches": sum(1 for c in counts if c == 0)}
+            "empty_searches": sum(1 for c in counts if c == 0),
+            "empty": [label for label, c in entries if c == 0],
+            "errors": SOURCE_ERRORS.get(name, [])}
 
 
 def collect_jobs() -> tuple[list[dict], list[dict]]:
@@ -939,8 +961,9 @@ def collect_jobs() -> tuple[list[dict], list[dict]]:
     all_jobs = []
     board_names = {"jobindex": "Jobindex", "itjobbank": "IT Jobbank", "stepstone": "StepStone",
                    "psykologjob": "Psykologjob"}
-    board_counts: dict[str, list[int]] = {name: [] for key, name in board_names.items()
-                                          if key in ENABLED_SOURCES}
+    board_counts: dict[str, list[tuple[str, int]]] = {name: [] for key, name in board_names.items()
+                                                      if key in ENABLED_SOURCES}
+    SOURCE_ERRORS.clear()
     career_status: list[dict] = []
 
     print(f"\n{'='*60}")
@@ -952,7 +975,7 @@ def collect_jobs() -> tuple[list[dict], list[dict]]:
         for slug, location, name in ITJOBBANK_SEARCHES:
             jobs = scrape_itjobbank(slug, location, name)
             all_jobs.extend(jobs)
-            board_counts["IT Jobbank"].append(len(jobs))
+            board_counts["IT Jobbank"].append((name, len(jobs)))
             print(f"  {name}: {len(jobs)} opslag")
             time.sleep(0.5)
 
@@ -962,7 +985,8 @@ def collect_jobs() -> tuple[list[dict], list[dict]]:
             for term in JOBINDEX_SEARCH_TERMS:
                 jobs = scrape_jobindex(term, area)
                 all_jobs.extend(jobs)
-                board_counts["Jobindex"].append(len(jobs))
+                label = term if len(JOBINDEX_AREAS) == 1 else f"{term} ({area})"
+                board_counts["Jobindex"].append((label, len(jobs)))
                 print(f"  '{term}' ({area}): {len(jobs)} opslag")
                 time.sleep(0.8)
 
@@ -971,8 +995,9 @@ def collect_jobs() -> tuple[list[dict], list[dict]]:
         for region in PSYKOLOGJOB_REGIONS:
             jobs = scrape_psykologjob(region)
             all_jobs.extend(jobs)
-            board_counts["Psykologjob"].append(len(jobs))
-            print(f"  Region {region}: {len(jobs)} opslag")
+            region_name = PSYKOLOGJOB_REGION_NAMES.get(region, f"Region {region}")
+            board_counts["Psykologjob"].append((region_name, len(jobs)))
+            print(f"  {region_name}: {len(jobs)} opslag")
             time.sleep(0.5)
 
     if "stepstone" in ENABLED_SOURCES:
@@ -980,7 +1005,7 @@ def collect_jobs() -> tuple[list[dict], list[dict]]:
         for path, geoid, name in STEPSTONE_SEARCHES:
             jobs = scrape_stepstone(path, geoid, name)
             all_jobs.extend(jobs)
-            board_counts["StepStone"].append(len(jobs))
+            board_counts["StepStone"].append((name, len(jobs)))
             print(f"  {name}: {len(jobs)} opslag")
             time.sleep(0.5)
 
@@ -1000,16 +1025,22 @@ def collect_jobs() -> tuple[list[dict], list[dict]]:
     })
 
     print(f"\nTotal råopslag: {len(all_jobs)}")
+    FUNNEL.clear()
+    FUNNEL["raw"] = len(all_jobs)
 
     if CUTOFF_DATE:
         all_jobs = [j for j in all_jobs if not j.get("date") or j["date"] >= CUTOFF_DATE]
         print(f"Efter datofilter (fra {CUTOFF_DATE}): {len(all_jobs)}")
+        FUNNEL["since"] = CUTOFF_DATE
+        FUNNEL["dated"] = len(all_jobs)
 
     unique_jobs = deduplicate(all_jobs)
     print(f"Efter deduplicering: {len(unique_jobs)}")
 
     cph_jobs = [j for j in unique_jobs if is_copenhagen_area(j)]
     print(f"Efter geografisk filtrering (Storkøbenhavn): {len(cph_jobs)}")
+    FUNNEL["unique"] = len(unique_jobs)
+    FUNNEL["area"] = len(cph_jobs)
 
     kept, excluded = [], []
     for job in cph_jobs:
@@ -1023,6 +1054,7 @@ def collect_jobs() -> tuple[list[dict], list[dict]]:
             kept.append(job)
     print(f"Efter titelfilter (senior, test, support, engineer mv.{', krav' if REQUIRE_PATTERN else ''}): {len(kept)} "
           f"({len(excluded)} frasorteret)")
+    FUNNEL["kept"] = len(kept)
     return kept, excluded
 
 
@@ -1054,14 +1086,62 @@ RATING_LABELS = {
 }
 
 
+def source_status_lines() -> list[tuple[bool, str]]:
+    """Kildestatus som (problem?, tekst): én linje pr. jobportal, karrieresider samlet,
+    og til sidst filtreringens tal. Problem = 0 opslag, søgninger uden hits eller fejl."""
+    out = []
+    for b in SOURCE_STATUS.get("boards", []):
+        text = f"{b['name']}: {b['count']} opslag"
+        if b["searches"] > 1:
+            text += f" fra {b['searches']} søgninger"
+        if b.get("empty"):
+            text += f". Uden hits: {', '.join(b['empty'])}"
+        if b.get("errors"):
+            text += f". Fejl: {'; '.join(b['errors'])}"
+        out.append((not b["count"] or bool(b.get("empty")) or bool(b.get("errors")), text))
+    sites = SOURCE_STATUS.get("career_sites", [])
+    if sites:
+        bad = [c for c in sites if c.get("error") or not c.get("count")]
+        text = f"Karrieresider: {sum(c.get('count', 0) for c in sites)} opslag fra {len(sites)} sider"
+        if bad:
+            text += ". Uden opslag eller med fejl: " + ", ".join(
+                f"{c['name']}{' (fejl)' if c.get('error') else ''}" for c in bad)
+        out.append((bool(bad), text))
+    if FUNNEL:
+        parts = [f"{FUNNEL['raw']} hentet"]
+        if "dated" in FUNNEL:
+            parts.append(f"{FUNNEL['dated']} slået op siden {format_date(FUNNEL['since'])}")
+        parts += [f"{FUNNEL.get('unique', 0)} efter dubletter",
+                  f"{FUNNEL.get('area', 0)} i området",
+                  f"{FUNNEL.get('kept', 0)} efter filtre"]
+        if "new" in FUNNEL:
+            parts.append(f"{FUNNEL['new']} nye")
+        out.append((False, "Filtrering: " + " → ".join(parts)))
+    return out
+
+
+def build_source_status_html() -> str:
+    lines = source_status_lines()
+    if not lines:
+        return ""
+    items = "".join(
+        f'<li style="margin:3px 0;color:{"#b3261e" if bad else "#555"};">{html_lib.escape(text)}</li>'
+        for bad, text in lines)
+    return (f'<h2 style="color:#323b4c;font-size:15px;margin:28px 0 6px;border-bottom:1px solid #ccc;'
+            f'padding-bottom:4px;">Kildestatus</h2>'
+            f'<ul style="margin:0;padding-left:18px;font-size:12px;line-height:1.45;">{items}</ul>')
+
+
 def build_html_email(jobs: list[dict]) -> str:
     today = datetime.now().strftime("%d/%m/%Y")
     jobs  = sort_by_rating(jobs)
 
     def job_card(job: dict) -> str:
         label, color, bg = RATING_LABELS[job.get("rating", "unrated")]
+        deadline = job.get("deadline", "")
+        deadline = f"Frist: {format_date(deadline) if deadline[:1].isdigit() else deadline}" if deadline else ""
         meta = " · ".join(x for x in [job.get("company", ""), job.get("location", ""),
-                                      job.get("source", ""), format_date(job.get("date", ""))] if x)
+                                      job.get("source", ""), format_date(job.get("date", "")), deadline] if x)
         return f"""
         <div style="background:#fff;border:1px solid #e0e0e0;border-left:5px solid {color};border-radius:6px;padding:12px 16px;margin-bottom:10px;">
           <a href="{job.get('link', '')}" style="color:#1a1a2e;text-decoration:none;font-size:15px;font-weight:600;">{job.get('title', '')}</a>
@@ -1083,7 +1163,7 @@ def build_html_email(jobs: list[dict]) -> str:
           {label} <span style="font-weight:400;color:#666;font-size:14px;">({len(group)})</span></h2>{cards}"""
 
     if not jobs:
-        sections = '<p style="text-align:center;color:#666;padding:30px;">Ingen nye opslag denne uge.</p>'
+        sections = '<p style="text-align:center;color:#666;padding:30px;">Ingen nye opslag siden sidste mail.</p>'
 
     counts = " · ".join(f"{RATING_LABELS[k][0]}: {sum(1 for j in jobs if j.get('rating') == k)}"
                         for k in ("green", "yellow", "red"))
@@ -1097,6 +1177,7 @@ def build_html_email(jobs: list[dict]) -> str:
   </div>
   <div style="background:#f8f9fb;border:1px solid #e0e0e0;border-top:none;border-radius:0 0 10px 10px;padding:8px 24px 24px;">
     {sections}
+    {build_source_status_html()}
   </div>
 </div></body></html>"""
 
@@ -1115,6 +1196,7 @@ def build_plain_text_email(jobs: list[dict]) -> str:
             lines.append(f"{job.get('title', '')} · {job.get('company', '')} · {job.get('location', '')}")
             lines.append(f"  {job.get('link', '')}")
         lines.append("")
+    lines += ["== KILDESTATUS =="] + [("! " if bad else "  ") + text for bad, text in source_status_lines()]
     return "\n".join(lines)
 
 
@@ -1251,6 +1333,7 @@ def run_job_alert(dry_run: bool = False) -> None:
     new_jobs = filter_new_jobs(kept, seen)
     print(f"\nTidligere sendte opslag: {len(seen)}")
     print(f"Nye opslag (ikke set før): {len(new_jobs)}")
+    FUNNEL["new"] = len(new_jobs)
 
     add_full_texts(new_jobs)
     api_key = get_anthropic_key()

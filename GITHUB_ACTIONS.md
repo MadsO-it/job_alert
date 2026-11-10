@@ -1,7 +1,11 @@
 # Job alert via GitHub Actions (mail)
 
-Workflowet `.github/workflows/job-alert-gurlin.yml` kører hver mandag morgen, scraper
-Jobindex og psykologjob.dk, lader Claude inddele opslagene i grøn/gul/rød og sender en mail.
+Workflowet `.github/workflows/job-alert-gurlin.yml` kører hver dag kl. 7.45 dansk tid, scraper
+Jobindex og psykologjob.dk, lader Claude inddele opslagene i grøn/gul/rød og sender en mail
+med opslag fra det seneste døgn og en kildestatus (hits pr. kilde, søgninger uden hits, fejl).
+GitHub forsinker typisk planlagte kørsler 5-15 minutter, så mailen lander omkring kl. 8.
+GitHubs tidsplaner er i UTC; workflowet planlægges derfor to gange, og et lille gate-job
+lader kun den kørsel fortsætte, der passer med dansk sommer- eller vintertid.
 Det kører på GitHubs servere, så ingen computer skal være tændt.
 
 ## Engangsopsætning
@@ -29,9 +33,9 @@ Uden den sendes en rigtig mail. Første mail bør markeres som "ikke spam" hos m
 
 - **Profilen** ligger kun som secret, aldrig i repoet. Formatet er beskrevet ved
   `apply_profile` i `job_alert.py`. Den kan ændres når som helst ved at opdatere secret'en.
-- **Dublethukommelsen** gemmes i Actions-cachen (`state/`). GitHub sletter cache, der ikke er
-  brugt i 7 dage, så den kan forsvinde mellem to ugentlige kørsler. Derfor køres med
-  `--since 8`: kun opslag fra de sidste 8 dage medtages. psykologjob.dk har ingen
+- **Dublethukommelsen** gemmes i Actions-cachen (`state/`), så et opslag kun sendes én gang.
+  Der køres med `--since 1`: kun opslag med opslagsdato i går eller i dag medtages, og
+  hukommelsen fjerner dem, der allerede er sendt. Jobindex angiver kun dato, ikke klokkeslæt. psykologjob.dk har ingen
   opslagsdato, så forsvinder cachen, kan opslag derfra blive sendt igen.
 - **Logs er offentlige**, fordi repoet er offentligt. Scriptet skriver søgeord og antal
   opslag i loggen, men ikke profilteksten, og secrets maskeres af GitHub.
