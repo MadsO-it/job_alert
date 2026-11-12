@@ -20,7 +20,10 @@ finde dens ATS og tilføje en linje med den rigtige "type" og parametre. Underst
     hrmanager     api.hr-manager.net/jobportal.svc/<kunde>/positionlist/json/
     talentsoft    <kunde>-career.talent-soft.com/job/list-of-all-jobs.aspx (HTML)
     phenom        Phenom People karriereside (POST /widgets)
-    + nogle enkelte specialtilfælde (nordea, nykredit, pfa, atp, lundbeck, valcon, netcompany)
+    teamtailor    <karriereside>/jobs.rss
+    workable      apply.workable.com/api/v1/widget/accounts/<konto>
+    + nogle enkelte specialtilfælde (nordea, nykredit, pfa, atp, lundbeck, valcon, netcompany,
+      orsted, capgemini)
 
 Returnerer opslag som dicts med nøglerne:
     title, company, location, link, date ("YYYY-MM-DD" eller ""), source ("Karriereside"),
@@ -161,6 +164,30 @@ def _post_json(url, body, session=None, headers=None):
     return r.json()
 
 
+def _session(warmup_url=None):
+    """Session med browser-headers; besøger evt. en side først for at få cookies."""
+    s = requests.Session()
+    s.headers.update(HEADERS)
+    if warmup_url:
+        try:
+            s.get(warmup_url, timeout=TIMEOUT)
+        except requests.RequestException:
+            pass
+    return s
+
+
+def _with_retry(fn, tries=3, pause=5):
+    """Kører fn() igen ved 403/429 (firewalls og rate limits der svinger fra kald til kald)."""
+    for attempt in range(tries):
+        try:
+            return fn()
+        except requests.HTTPError as e:
+            code = e.response.status_code if e.response is not None else 0
+            if code not in (403, 429) or attempt == tries - 1:
+                raise
+            time.sleep(pause * (attempt + 1))
+
+
 # ─── Workday ──────────────────────────────────────────────────────────────────
 
 def _workday_dk_facet(facets) -> tuple[str, str] | None:
@@ -196,8 +223,9 @@ def scrape_workday(cfg) -> list[dict]:
             break
         for p in postings:
             location = p.get("locationsText", "")
-            # Uden Danmark-facet filtreres på lokationsteksten ("2 Locations" o.l. beholdes ikke)
-            if not facet and not _is_dk(location):
+            # Uden Danmark-facet filtreres på lokationsteksten ("2 Locations" o.l. beholdes ikke).
+            # "all_dk": arbejdsgiveren har kun danske opslag (lokationer som "Langelinie").
+            if not facet and not cfg.get("all_dk") and not _is_dk(location):
                 continue
             jobs.append(_job(
                 cfg, p.get("title"), location,
@@ -253,11 +281,17 @@ def scrape_rmk(cfg) -> list[dict]:
     for _ in range(10):
         page = _get(f"{base}/search/{query}&startrow={startrow}").text
         rows = re.findall(r'<tr class="data-row">(.*?)</tr>', page, re.S)
+        tiles = not rows
+        if tiles:  # nyere skabelon med "job-tile"-kort i stedet for tabel (fx Carlsberg)
+            rows = page.split('<li class="job-tile ')[1:]
         if not rows:
             break
         new = 0
         for row in rows:
-            m = re.search(r'href="([^"]+)" class="jobTitle-link">([^<]+)', row)
+            if tiles:
+                m = re.search(r'class="jobTitle-link[^"]*"[^>]*href="([^"]+)">\s*([^<]+)', row)
+            else:
+                m = re.search(r'href="([^"]+)" class="jobTitle-link">([^<]+)', row)
             if not m:
                 continue
             link = base + html.unescape(m.group(1))
@@ -265,8 +299,12 @@ def scrape_rmk(cfg) -> list[dict]:
                 continue
             seen.add(link)
             new += 1
-            loc = re.search(r'class="jobLocation"[^>]*>\s*([^<]+)', row)
-            dt = re.search(r'class="jobDate"[^>]*>\s*([^<]+)', row)
+            if tiles:
+                loc = re.search(r'desktop-section-location-value">\s*([^<]+)', row)
+                dt = re.search(r'desktop-section-date-value">\s*([^<]+)', row)
+            else:
+                loc = re.search(r'class="jobLocation"[^>]*>\s*([^<]+)', row)
+                dt = re.search(r'class="jobDate"[^>]*>\s*([^<]+)', row)
             location = loc.group(1).strip() if loc else ""
             if cfg.get("filter_dk") and not _is_dk(location):
                 continue
@@ -395,10 +433,15 @@ def scrape_easycruit(cfg) -> list[dict]:
 # ─── HR-Manager ───────────────────────────────────────────────────────────────
 
 def scrape_hrmanager(cfg) -> list[dict]:
+    """'department_id' bruges når kunden er en fælles portal (fx Statens Rekrutteringsløsning),
+    og kun én myndigheds opslag skal med. take=1000, ellers returneres kun de første 25."""
     data = _get(f"https://api.hr-manager.net/jobportal.svc/{cfg['customer']}/positionlist/json/",
-                headers=JSON_HEADERS).json()
+                params={"take": 1000}, headers=JSON_HEADERS).json()
+    dept = cfg.get("department_id")
     jobs = []
     for p in data.get("Items", []):
+        if dept and (p.get("Department") or {}).get("Id") != dept:
+            continue
         loc = p.get("PositionLocation") or {}
         url = p.get("AdvertisementUrlSecure") or p.get("AdvertisementUrl") or ""
         # Opslags-id'et står kun i query-strengen; job_alert.py fjerner query ved dublet-tjek,
@@ -460,7 +503,86 @@ def scrape_phenom(cfg) -> list[dict]:
     return jobs
 
 
+# ─── Teamtailor ───────────────────────────────────────────────────────────────
+
+def scrape_teamtailor(cfg) -> list[dict]:
+    """Teamtailor-karrieresider har et RSS-feed på <base>/jobs.rss med lokationer i tt-navnerummet."""
+    ns = {"tt": "https://teamtailor.com/locations"}
+    root = ET.fromstring(_get(f"{cfg['base']}/jobs.rss").content)
+    jobs = []
+    for item in root.findall("channel/item"):
+        locs = item.findall("tt:locations/tt:location", ns)
+        if locs and not any((l.findtext("tt:country", "", ns) or "").lower() in ("denmark", "danmark")
+                            for l in locs):
+            continue
+        location = "; ".join(dict.fromkeys(l.findtext("tt:name", "", ns) for l in locs if
+                                           l.findtext("tt:name", "", ns)))
+        pub = item.findtext("pubDate", "")
+        try:
+            date_str = datetime.strptime(pub, "%a, %d %b %Y %H:%M:%S %z").strftime("%Y-%m-%d")
+        except ValueError:
+            date_str = ""
+        jobs.append(_job(cfg, item.findtext("title", ""), location, item.findtext("link", ""),
+                         date_str, item.findtext("description", "")))
+    return jobs
+
+
+# ─── Workable ─────────────────────────────────────────────────────────────────
+
+def scrape_workable(cfg) -> list[dict]:
+    """Workables offentlige widget-API. Workable rate-begrænser visse datacenter-IP'er (HTTP 429)."""
+    data = _with_retry(lambda: _get(
+        f"https://apply.workable.com/api/v1/widget/accounts/{cfg['account']}",
+        headers=JSON_HEADERS).json())
+    jobs = []
+    for j in data.get("jobs", []):
+        locs = j.get("locations") or [{"country": j.get("country"), "city": j.get("city")}]
+        dk = [l for l in locs if (l.get("countryCode") or "").upper() == "DK"
+              or (l.get("country") or "").lower() in ("denmark", "danmark")]
+        if not dk:
+            continue
+        location = "; ".join(dict.fromkeys(l.get("city") or "Denmark" for l in dk))
+        jobs.append(_job(cfg, j.get("title"), location, j.get("url") or j.get("shortlink", ""),
+                         _iso(j.get("published_on") or j.get("created_at"))))
+    return jobs
+
+
 # ─── Specialtilfælde (egne CMS-løsninger) ─────────────────────────────────────
+
+def scrape_orsted(cfg) -> list[dict]:
+    """Orsted.com (Sitecore): POST /api/jobs/jobList med landefilter. Kun ansøgningsfrist, ingen
+    opslagsdato. item/countryFilterID står som data-attributter på vacancies-list-siden."""
+    body = {"offset": 0, "start": 0, "length": 150,
+            "item": "41d69dfd-861a-4b9b-aa6e-8db172f7ed3e",
+            "countryFilterID": "{A86A8D05-3DCC-46B3-99DE-026C83655B58}",
+            "category": "", "employmenttype": "", "country": "denmark", "location": "",
+            "jobtitle": ""}
+    page = "https://orsted.com/en/careers/vacancies-list"
+    # Ørsteds firewall afviser af og til kaldet (403); siden besøges først for cookies.
+    data = _with_retry(lambda: _post_json(
+        "https://orsted.com/api/jobs/jobList", body, _session(page),
+        {"Origin": "https://orsted.com", "Referer": page}))
+    return [_job(cfg, j.get("JobName"), j.get("PositionWorkPlace") or j.get("PositionLocation", ""),
+                 j.get("Link", ""))
+            for j in data.get("data", [])]
+
+
+def scrape_capgemini(cfg) -> list[dict]:
+    """Capgemini.com henter opslag fra deres 'jobstream'-API; country_code=dk-en giver de danske.
+    Ingen opslagsdato; indexed_at (første gang opslaget blev indekseret) bruges i stedet."""
+    data = _get("https://cg-jobstream-api.azurewebsites.net/api/job-search",
+                params={"country_code": "dk-en", "size": MAX_PER_EMPLOYER, "page": 1},
+                headers=JSON_HEADERS).json()
+    jobs = []
+    for j in data.get("data", []):
+        location = (j.get("location") or "").replace("Copenhagen = Kobenhavn", "København")
+        link = (j.get("apply_job_url") or "").split("?")[0]
+        jobs.append(_job(cfg, j.get("title"), location or "Denmark", link,
+                         _iso(j.get("indexed_at")), j.get("description_stripped", "")))
+    return jobs
+
+
+
 
 def scrape_nordea(cfg) -> list[dict]:
     """Nordea.com har eget JSON-endpoint; 10 pr. side; Danmark = location_tid 1331."""
@@ -582,12 +704,22 @@ EMPLOYERS = [
     {"name": "Lån & Spar Bank", "type": "easycruit", "customer": "lsb"},
     {"name": "SDC",           "type": "netcompany", "company": "Netcompany Banking Services (SDC)",
      "title_filter": r"banking services|\bSDC\b"},
+    # AL Sydbank = Arbejdernes Landsbank + Sydbank + Vestjysk Bank (fusioneret 2025)
+    {"name": "AL Sydbank",    "type": "teamtailor", "base": "https://karriere.al-sydbank.dk"},
+    # Jyske Bank er ikke med: opslagene ligger på jyskebank.dk bag Cloudflares menneske-tjek.
+    # Myndigheder
+    {"name": "Danmarks Nationalbank", "type": "workday",
+     "host": "nationalbanken.wd103.myworkdayjobs.com", "tenant": "nationalbanken",
+     "site": "Danmarks_Nationalbank", "all_dk": True},
+    {"name": "Finanstilsynet", "type": "hrmanager", "customer": "statensrekrutteringsloesning_tr",
+     "department_id": 18985},
     # Pension / forsikring
     {"name": "PFA",           "type": "pfa", "default_location": "København Ø"},
     {"name": "Velliv",        "type": "easycruit", "customer": "velliv"},
     {"name": "ATP",           "type": "atp"},
     {"name": "Tryg",          "type": "sf_csb", "base": "https://careers.tryg.com",
      "locales": ["da_DK", "en_US"]},
+    # If Skadeforsikring dækker også Topdanmark (en del af If siden 1. juli 2025)
     {"name": "If Skadeforsikring", "type": "workday", "host": "if.wd502.myworkdayjobs.com",
      "tenant": "if", "site": "Careers"},
     {"name": "PensionDanmark", "type": "talentsoft", "host": "pensiondanmark-career.talent-soft.com",
@@ -606,6 +738,15 @@ EMPLOYERS = [
      "tenant": "zealandpharma", "site": "External"},
     {"name": "Novo Nordisk",  "type": "rmk", "base": "https://careers.novonordisk.com",
      "query": "?q=&optionsFacetsDD_country=DK"},
+    {"name": "Novo Holdings", "type": "workable", "account": "novoholdings"},
+    {"name": "Coloplast",     "type": "rmk", "base": "https://careers.coloplast.com",
+     "query": "?q=&locationsearch=Denmark", "filter_dk": True},
+    # Øvrige store arbejdsgivere
+    {"name": "Carlsberg",     "type": "rmk", "base": "https://careers.carlsberg.com",
+     "query": "?q=&optionsFacetsDD_country=DK", "filter_dk": True},
+    {"name": "Maersk",        "type": "workday", "host": "maersk.wd3.myworkdayjobs.com",
+     "tenant": "maersk", "site": "Maersk_Careers"},
+    {"name": "Ørsted",        "type": "orsted"},
     # Finansiel IT / betaling
     {"name": "Nexi/Nets",     "type": "oracle", "host": "fa-ewwx-saasfaprod1.fa.ocs.oraclecloud.com",
      "site": "CX_1", "dk_location_id": "300000000459853"},
@@ -617,6 +758,9 @@ EMPLOYERS = [
     {"name": "Implement Consulting Group", "type": "smartrecruiters",
      "company_id": "ImplementConsultingGroup"},
     {"name": "Valcon",        "type": "valcon"},
+    {"name": "Deloitte",      "type": "smartrecruiters", "company_id": "DeloitteNordic"},
+    {"name": "Capgemini",     "type": "capgemini"},
+    {"name": "PA Consulting", "type": "smartrecruiters", "company_id": "PAConsulting"},
     {"name": "DNV",           "type": "oracle", "host": "ecyq.fa.em2.oraclecloud.com", "site": "CX_1"},
     {"name": "Systematic",    "type": "rmk", "base": "https://jobs.systematic.com",
      "query": "?q=&optionsFacetsDD_country=DK"},
@@ -634,6 +778,10 @@ SCRAPERS = {
     "hrmanager":       scrape_hrmanager,
     "talentsoft":      scrape_talentsoft,
     "phenom":          scrape_phenom,
+    "teamtailor":      scrape_teamtailor,
+    "workable":        scrape_workable,
+    "orsted":          scrape_orsted,
+    "capgemini":       scrape_capgemini,
     "nordea":          scrape_nordea,
     "nykredit":        scrape_nykredit,
     "pfa":             scrape_pfa,
