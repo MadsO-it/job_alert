@@ -747,6 +747,9 @@ EMPLOYERS = [
     {"name": "Maersk",        "type": "workday", "host": "maersk.wd3.myworkdayjobs.com",
      "tenant": "maersk", "site": "Maersk_Careers"},
     {"name": "Ørsted",        "type": "orsted"},
+    # Mining (hovedkontor på Havneholmen; Danmark-facet vælges automatisk)
+    {"name": "FLSmidth",      "type": "workday", "host": "flsmidth.wd3.myworkdayjobs.com",
+     "tenant": "flsmidth", "site": "FLS_Global"},
     # Finansiel IT / betaling
     {"name": "Nexi/Nets",     "type": "oracle", "host": "fa-ewwx-saasfaprod1.fa.ocs.oraclecloud.com",
      "site": "CX_1", "dk_location_id": "300000000459853"},
