@@ -16,7 +16,7 @@ To måder at køre det på:
 
 - **Lokalt (Mac):** `python job_alert.py` sender en HTML-mail grupperet efter farve. Køres ugentligt via `launchd`.
 - **GitHub Actions med mail:** samme kørsel som lokalt, men på GitHubs servere og med en profil fra en secret, så værktøjet kan køre for andre end mig. Se [GITHUB_ACTIONS.md](GITHUB_ACTIONS.md).
-- **I skyen:** en planlagt Claude-session følger [CLOUD_RUN.md](CLOUD_RUN.md), laver selv farvevurderingen og opdaterer en privat resultatside. Kræver hverken computer, SMTP eller API-nøgle. På resultatsiden kan opslag gemmes; de bliver stående øverst, til de er markeret som søgt eller er taget ned (`check_saved.py` tjekker dem hver morgen).
+- **I skyen:** en planlagt Claude-session følger [CLOUD_RUN.md](CLOUD_RUN.md), laver selv farvevurderingen og opdaterer en privat resultatside. Kræver hverken computer, SMTP eller API-nøgle. På resultatsiden kan opslag gemmes; de bliver stående øverst, til de er markeret som søgt eller er taget ned (`check_saved.py` tjekker dem hver morgen). Opslag kan også skjules, fx når en grøn vurdering ikke holder ved nærmere læsning; de flyttes til "Skjulte opslag" under kørslen og kan vises igen derfra.
 
 ## Hvorfor
 

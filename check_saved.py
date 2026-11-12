@@ -4,7 +4,8 @@ Tjekker om de opslag, Mads har gemt på resultatsiden, stadig er slået op.
 Markeringerne ligger i resultatsidens database (samlingen "marks"), hvor siden selv
 skriver dem. Den daglige kørsel henter dem med ArtifactData, kører dette script og
 skriver resultatet tilbage som feltet "check" på hver markering. Siden skjuler et gemt
-opslag, når check.state er "removed".
+opslag, når check.state er "removed". Kun markeringer med status "saved" tjekkes;
+"applied" og "hidden" (skjult af Mads på siden) springes over.
 
 Brug:
   python check_saved.py <marks-mappe eller -fil> --out mark_updates.json

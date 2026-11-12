@@ -152,7 +152,7 @@ footer { color: var(--muted); font-size: 12px; }
 #saved h2 { font-family: var(--font-display); font-size: 15px; font-weight: 600; margin: 0; display: flex; gap: 8px; align-items: baseline; }
 #saved h2 .n { color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
 #saved details { border-top: 0; padding-top: 2px; }
-#saved details > div { display: grid; gap: 8px; margin-top: 8px; }
+#saved details > div, #hidden-list { display: grid; gap: 8px; margin-top: 8px; }
 .saved-empty { color: var(--muted); font-size: 14px; margin: 0; }
 .acts { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; }
 .act { font-family: var(--font-display); font-weight: 600; font-size: 12.5px; min-height: 34px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; }
@@ -192,9 +192,10 @@ footer { color: var(--muted); font-size: 12px; }
     <div class="row" id="chips" role="group" aria-label="Vis farver"></div>
   </div>
   <div id="list"></div>
+  <details id="hidden" hidden><summary id="hidden-sum"></summary><div id="hidden-list" class="group"></div></details>
   <details id="excl"><summary id="excl-sum"></summary><ul id="excl-list"></ul></details>
   <details id="src"><summary id="src-sum"></summary><ul id="src-list"></ul></details>
-  <footer>Farverne er Claudes forslag ud fra din profil. Grøn: klart match. Gul: delvist eller uklart. Rød: dårligt match. Gemte opslag tjekkes hver morgen og flyttes ned under "Ikke længere slået op", når annoncen er taget ned, eller fristen er udløbet.</footer>
+  <footer>Farverne er Claudes forslag ud fra din profil. Grøn: klart match. Gul: delvist eller uklart. Rød: dårligt match. Gemte opslag tjekkes hver morgen og flyttes ned under "Ikke længere slået op", når annoncen er taget ned, eller fristen er udløbet. Skjulte opslag ligger under "Skjulte opslag" for den kørsel, de kom i, og kan vises igen derfra.</footer>
 </div></main>
 
 <script type="application/json" id="data">__DATA__</script>
@@ -216,11 +217,16 @@ const el = (tag, attrs = {}, text) => { const e = document.createElement(tag);
 const runSel = document.getElementById("run");
 DATA.runs.forEach((r, i) => runSel.append(el("option", { value: i }, `${fmtRun(r.run_at)} · ${r.jobs.length} nye`)));
 
+const isHidden = j => dbState === "ready" && (marks.get(markId(j.link)) || {}).status === "hidden";
+
 function render() {
   const run = DATA.runs[+runSel.value || 0];
-  const counts = Object.fromEntries(ORDER.map(k => [k, run.jobs.filter(j => j.rating === k).length]));
+  const hidden = run.jobs.filter(isHidden);
+  const visible = run.jobs.filter(j => !isHidden(j));
+  const counts = Object.fromEntries(ORDER.map(k => [k, visible.filter(j => j.rating === k).length]));
   document.getElementById("sub").textContent =
-    `${run.jobs.length} nye opslag ${fmtRun(run.run_at)} · ${counts.green} grønne, ${counts.yellow} gule, ${counts.red} røde`;
+    `${run.jobs.length} nye opslag ${fmtRun(run.run_at)} · ${counts.green} grønne, ${counts.yellow} gule, ${counts.red} røde` +
+    (hidden.length ? ` · ${hidden.length} skjult` : "");
 
   const chips = document.getElementById("chips"); chips.replaceChildren();
   ORDER.filter(k => k !== "unrated" || counts.unrated).forEach(k => {
@@ -232,7 +238,7 @@ function render() {
   const list = document.getElementById("list"); list.replaceChildren();
   let any = false;
   ORDER.forEach(k => {
-    const jobs = run.jobs.filter(j => j.rating === k);
+    const jobs = visible.filter(j => j.rating === k);
     if (!show[k] || !jobs.length) return;
     any = true;
     const g = el("section", { class: "group" });
@@ -240,7 +246,13 @@ function render() {
     jobs.forEach(j => g.append(jobCard(j, k, run)));
     list.append(g);
   });
-  if (!any) list.append(el("p", { class: "empty" }, run.jobs.length ? "Alle farver er slået fra. Tryk på en farve ovenfor." : "Ingen nye opslag i denne kørsel."));
+  if (!any) list.append(el("p", { class: "empty" }, !run.jobs.length ? "Ingen nye opslag i denne kørsel." :
+    !visible.length ? "Alle opslag i denne kørsel er skjult." : "Alle farver er slået fra. Tryk på en farve ovenfor."));
+
+  const hid = document.getElementById("hidden");
+  hid.hidden = !hidden.length;
+  document.getElementById("hidden-sum").textContent = `Skjulte opslag i denne kørsel (${hidden.length})`;
+  document.getElementById("hidden-list").replaceChildren(...hidden.map(j => hiddenCard(j)));
 
   const ex = run.excluded || [];
   document.getElementById("excl").hidden = !ex.length;
@@ -318,18 +330,40 @@ function jobCard(j, k, run) {
     b.disabled = pending.has(id);
     b.onclick = () => m ? write(id, ref => ref.delete()) : saveJob(j, run);
     acts.append(b);
+    if (!m) {
+      const h = el("button", { class: "act quiet", type: "button" }, "Skjul");
+      h.disabled = pending.has(id);
+      h.onclick = () => hideJob(j, run);
+      acts.append(h);
+    }
   }
   card.append(acts);
   return card;
 }
 
-function saveJob(j, run) {
-  write(markId(j.link), ref => ref.set({
-    status: "saved", link: j.link, title: j.title, company: j.company || "", location: j.location || "",
-    source: j.source || "", rating: j.rating || "unrated", deadline: j.deadline || "",
-    first_seen: run.run_at, saved_at: new Date().toISOString(),
-  }));
+function hiddenCard(j) {
+  const id = markId(j.link);
+  const card = el("article", { class: "job gone", "data-r": j.rating || "unrated" });
+  card.append(el("a", { href: j.link, target: "_blank", rel: "noopener" }, j.title));
+  card.append(el("div", { class: "meta" }, [j.company, j.location, j.source, fmtDate(j.date)].filter(Boolean).join(" · ")));
+  const acts = el("div", { class: "acts" });
+  const b = el("button", { class: "act quiet", type: "button" }, "Vis igen");
+  b.disabled = pending.has(id);
+  b.onclick = () => write(id, ref => ref.delete());
+  acts.append(b);
+  card.append(acts);
+  return card;
 }
+
+function jobMark(j, run, status) {
+  return {
+    status, link: j.link, title: j.title, company: j.company || "", location: j.location || "",
+    source: j.source || "", rating: j.rating || "unrated", deadline: j.deadline || "",
+    first_seen: run.run_at, [status + "_at"]: new Date().toISOString(),
+  };
+}
+function saveJob(j, run) { write(markId(j.link), ref => ref.set(jobMark(j, run, "saved"))); }
+function hideJob(j, run) { write(markId(j.link), ref => ref.set(jobMark(j, run, "hidden"))); }
 
 async function write(id, fn) {
   if (!db || pending.has(id)) return;
@@ -387,6 +421,7 @@ function renderSaved() {
   }
   const active = [], gone = [], applied = [];
   marks.forEach((m, id) => {
+    if (m.status === "hidden") return;
     if (m.status === "applied") applied.push([id, m]);
     else if ((m.check || {}).state === "removed" || deadlinePassed(m)) gone.push([id, m]);
     else active.push([id, m]);

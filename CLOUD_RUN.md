@@ -98,6 +98,8 @@ Resultatside: https://claude.ai/artifact/CqRmLzWfJJTaSDkE3brsbi
    (siden har database-capability; udeladt bevares den, og Mads' gemte opslag med den).
 
 8. Tjek Mads' gemte opslag. Siden gemmer markeringer i sin database (samlingen `marks`).
+   Markeringer har `status` `saved`, `applied` eller `hidden` (skjult af Mads); kun `saved`
+   tjekkes, og de øvrige røres ikke.
    - Hent dem: ArtifactData `action: "list"`, `url: <resultatside>`, `collection: "marks"`,
      `out_dir: marks`. Er samlingen tom, så spring resten af trinnet over.
    - Gem list-svarets tekst (linjerne med `"<doc_id>" … version N`) ordret i
